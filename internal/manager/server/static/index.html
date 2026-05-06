@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="1">
+<title>Cluster Manager — Admin Dashboard</title>
+<link rel="stylesheet" href="/static/default.css">
+</head>
+<body>
+<h1>Cluster Manager</h1>
+
+<h2>Connected Workers</h2>
+<div class="grid">
+  <div class="card"><div class="label">Total</div><div class="value">{{.TotalWorkers}}</div></div>
+  <div class="card"><div class="label">Ready</div><div class="value green">{{.ReadyWorkers}}</div></div>
+  <div class="card"><div class="label">Processing</div><div class="value yellow">{{.ProcessingWorkers}}</div></div>
+  <div class="card"><div class="label">Unavailable</div><div class="value red">{{.UnavailableWorkers}}</div></div>
+  <div class="card"><div class="label">Offline</div><div class="value">{{.OfflineWorkers}}</div></div>
+</div>
+
+<h2>Workers by Role</h2>
+{{if .RoleCounts}}
+<table>
+<thead><tr><th>Role</th><th>Available</th><th>Total</th></tr></thead>
+<tbody>
+{{range .RoleCounts}}<tr><td>{{.Role}}</td><td>{{.Online}}</td><td>{{.Total}}</td></tr>
+{{end}}</tbody>
+</table>
+{{else}}<p class="empty">No role assignments yet.</p>{{end}}
+
+<h2>Payloads Units — Today</h2>
+<div class="grid">
+  <div class="card"><div class="label">Total</div><div class="value blue">{{.TodayTotal}}</div></div>
+  <div class="card"><div class="label">Completed</div><div class="value green">{{.TodayCompleted}}</div></div>
+  <div class="card"><div class="label">Queued</div><div class="value blue">{{.TodayQueued}}</div></div>
+  <div class="card"><div class="label">Timeout</div><div class="value yellow">{{.TodayTimeout}}</div></div>
+  <div class="card"><div class="label">Failed</div><div class="value red">{{.TodayFailed}}</div></div>
+</div>
+
+{{if .RoleWorkCounts}}
+<h2>Payloads by Types — Today</h2>
+<table>
+<thead><tr><th>Role</th><th>Requests</th></tr></thead>
+<tbody>
+{{range .RoleWorkCounts}}<tr><td>{{.Role}}</td><td>{{.Total}}</td></tr>
+{{end}}</tbody>
+</table>
+{{end}}
+
+<h2>Recent Client Errors (last 10)</h2>
+{{if .Errors}}
+<table>
+<thead><tr><th>Time</th><th>Worker</th><th>Version</th><th>Error</th></tr></thead>
+<tbody>
+{{range .Errors}}<tr><td class="mono">{{.ReportedAt}}</td><td class="mono">{{.Fingerprint}}</td><td>{{.Version}}</td><td>{{.Error}}</td></tr>
+{{end}}</tbody>
+</table>
+{{else}}<p class="empty">No errors recorded.</p>{{end}}
+
+<div class="footer">Generated at {{.GeneratedAt}}</div>
+</body>
+</html>

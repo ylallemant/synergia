@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepThink Worker</title>
+    <link rel="stylesheet" href="/static/default.css">
+    <link rel="stylesheet" href="/static/branding.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header-line">
+            <h1>DeepThink Worker</h1>
+            <div class="status-line">
+                <span id="status-dot" class="status-dot dot-red"></span>
+                <span id="status-text">Connecting...</span>
+            </div>
+        </div>
+
+        <!-- Consent Banner -->
+        <div id="consent-banner" class="consent-banner">
+            <p><strong>The client monitors system activity locally and will not accept payloads when you personally need your CPU/GPU.</strong></p>
+            <p>(gaming, video editing, etc.)</p>
+            <hr>
+            <br>
+            <h2>Data Collection Consent Required</h2>
+            <p>To participate in the DeepThink cluster, you must accept the collection and centralisation of:</p>
+            <ul>
+                <li><strong>Fingerprint</strong> — a unique cryptographic identity for this worker</li>
+                <li><strong>Hardware statistics</strong> — OS + version, GPU + VRAM + driver/version, CPU + core count, RAM</li>
+                <li><strong>Configuration preferences</strong> — model size limits, quantisation, preferred role</li>
+            </ul>
+            <p>This data is tied to your worker fingerprint and used by the cluster manager to schedule work efficiently. No personal information is collected.</p>
+            <div class="consent-actions">
+                <button class="btn btn-accept" onclick="acceptConsent()">Accept &amp; Join Cluster</button>
+            </div>
+            <div class="data-preview-section">
+                <h3>Data sent to cluster manager</h3>
+                <pre id="consent-data-preview">Loading...</pre>
+            </div>
+        </div>
+
+        <!-- Accepted state -->
+        <div id="consent-accepted" class="consent-banner accepted hidden">
+            <div class="consent-header-row">
+                <h2>&#10003; Data Collection Accepted</h2>
+                <div class="consent-header-actions">
+                    <button class="btn btn-revoke" onclick="revokeConsent()">Revoke</button>
+                    <button class="btn btn-info" onclick="toggleConsentInfo()" title="Show details">i</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Consent info panel (shown on (i) click) -->
+        <div id="consent-info-panel" class="consent-banner info-panel hidden">
+            <p><strong>The client monitors system activity locally and will not accept payloads when you personally need your CPU/GPU.</strong></p>
+            <p>(gaming, video editing, etc.)</p>
+            <hr>
+            <br>
+            <p>To participate in the DeepThink cluster, the following data is collected:</p>
+            <ul>
+                <li><strong>Fingerprint</strong> — a unique cryptographic identity for this worker</li>
+                <li><strong>Hardware statistics</strong> — OS + version, GPU + VRAM + driver/version, CPU + core count, RAM</li>
+                <li><strong>Configuration preferences</strong> — model size limits, quantisation, preferred role</li>
+            </ul>
+            <p>This data is tied to your worker fingerprint and used by the cluster manager to schedule work efficiently. No personal information is collected.</p>
+            <div class="data-preview-section">
+                <h3>Data sent to cluster manager</h3>
+                <pre id="consent-info-preview">Loading...</pre>
+            </div>
+        </div>
+
+        <!-- Autostart (shown when consented) -->
+        <div id="autostart-banner" class="autostart-banner hidden">
+            <div class="autostart-row">
+                <label for="autostart-toggle">Start on login</label>
+                <div class="autostart-actions">
+                    <input type="checkbox" id="autostart-toggle" onchange="toggleAutostart(this.checked)">
+                    <button class="btn btn-info" onclick="toggleAutostartInfo()" title="Show details">i</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Autostart info panel (shown on (i) click) -->
+        <div id="autostart-info-panel" class="autostart-banner info-panel hidden">
+            <p class="autostart-info-label">Binary location:</p>
+            <p class="autostart-info-path" id="autostart-path"></p>
+        </div>
+
+        <div class="card">
+            <h2>Statistics</h2>
+            <div class="stat"><span class="label">Units Processed</span><span class="value" id="units">0</span></div>
+            <div class="stat"><span class="label">Uptime</span><span class="value" id="uptime">—</span></div>
+            <div class="stat"><span class="label">Model</span><span class="value" id="model">—</span></div>
+            <div class="stat"><span class="label">Quantisation</span><span class="value" id="quantisation">—</span></div>
+        </div>
+
+        <!-- Configuration (only visible when consented) -->
+        <div id="config-card" class="card hidden">
+            <h2>Configuration</h2>
+
+            <!-- Hardware ineligibility banner (shown when no role fits) -->
+            <div id="no-roles-banner" class="no-roles-banner hidden">
+                <p><strong>&#9888; Hardware Insufficient</strong></p>
+                <p>Your GPU does not meet the minimum VRAM requirements for any available role. This worker cannot participate in the cluster.</p>
+            </div>
+
+            <div id="role-form" class="hidden">
+                <div class="form-row">
+                    <label>Preferred Role</label>
+                    <select id="cfg-role"></select>
+                </div>
+                <div id="role-details" class="role-details"></div>
+                <div class="form-actions">
+                    <button class="btn btn-save" onclick="saveConfig()">Save &amp; Sync</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Collected Worker Info</h2>
+            <div class="stat"><span class="label">OS</span><span class="value" id="hw-os">—</span></div>
+            <div class="stat"><span class="label">GPU</span><span class="value" id="hw-gpu">—</span></div>
+            <div class="stat"><span class="label">GPU Driver</span><span class="value" id="hw-gpu-driver">—</span></div>
+            <div class="stat"><span class="label">VRAM</span><span class="value" id="hw-vram">—</span></div>
+            <div class="stat"><span class="label">CPU</span><span class="value" id="hw-cpu">—</span></div>
+            <div class="stat"><span class="label">RAM</span><span class="value" id="hw-ram">—</span></div>
+            <div class="stat"><span class="label">GPU State</span><span class="value" id="gpu-state">—</span></div>
+        </div>
+
+        <div class="card">
+            <h2>Identity</h2>
+            <div class="fingerprint" id="fingerprint">—</div>
+        </div>
+    </div>
+
+    <script>
+        async function refresh() {
+            try {
+                const resp = await fetch('/api/status');
+                const data = await resp.json();
+
+                document.getElementById('model').textContent = data.model || '—';
+                document.getElementById('quantisation').textContent = data.quantisation || '—';
+                document.getElementById('gpu-state').textContent = data.gpu_state || '—';
+                document.getElementById('units').textContent = data.units_processed;
+                document.getElementById('uptime').textContent = formatUptime(data.uptime_seconds);
+                document.getElementById('fingerprint').textContent = data.fingerprint || '—';
+
+                // Hardware info
+                if (data.hardware) {
+                    const hw = data.hardware;
+                    document.getElementById('hw-os').textContent = hw.os + ' ' + (hw.os_version || '');
+                    document.getElementById('hw-gpu').textContent = hw.gpu || '—';
+                    const driverParts = [hw.gpu_driver, hw.gpu_driver_version].filter(Boolean);
+                    document.getElementById('hw-gpu-driver').textContent = driverParts.length ? driverParts.join(' ') : '—';
+                    document.getElementById('hw-vram').textContent = hw.vram_mb ? (hw.vram_mb >= 1024 ? (hw.vram_mb / 1024).toFixed(1) + ' GB' : hw.vram_mb + ' MB') : '—';
+                    document.getElementById('hw-cpu').textContent = (hw.cpu || '—') + ' (' + hw.cpu_cores + ' cores)';
+                    document.getElementById('hw-ram').textContent = hw.ram_mb ? (hw.ram_mb >= 1024 ? (hw.ram_mb / 1024).toFixed(1) + ' GB' : hw.ram_mb + ' MB') : '—';
+                }
+
+                const dot = document.getElementById('status-dot');
+                const text = document.getElementById('status-text');
+
+                if (!data.connected) {
+                    dot.className = 'status-dot dot-red';
+                    text.textContent = 'Disconnected';
+                } else if (!data.consent || !data.consent.accepted) {
+                    dot.className = 'status-dot dot-grey';
+                    text.textContent = 'Connected — Unavailable';
+                } else if (data.paused) {
+                    dot.className = 'status-dot dot-grey';
+                    text.textContent = 'Connected — Paused';
+                } else if (data.processing) {
+                    dot.className = 'status-dot dot-blue';
+                    text.textContent = 'Connected — Processing';
+                } else if (data.gpu_state === 'idle') {
+                    dot.className = 'status-dot dot-yellow';
+                    text.textContent = 'Connected — GPU Busy (Idle)';
+                } else {
+                    dot.className = 'status-dot dot-green';
+                    text.textContent = 'Connected — Ready';
+                }
+
+                updateConsentUI(data.consent);
+
+                if (data.config) {
+                    updateConfigForm(data.config);
+                }
+            } catch (e) {
+                document.getElementById('status-dot').className = 'status-dot dot-red';
+                document.getElementById('status-text').textContent = 'Error';
+            }
+        }
+
+        function updateConsentUI(consent) {
+            const banner = document.getElementById('consent-banner');
+            const accepted = document.getElementById('consent-accepted');
+            const configCard = document.getElementById('config-card');
+            const autostartBanner = document.getElementById('autostart-banner');
+
+            if (consent && consent.accepted) {
+                banner.classList.add('hidden');
+                accepted.classList.remove('hidden');
+                configCard.classList.remove('hidden');
+                autostartBanner.classList.remove('hidden');
+                loadRoles(null);
+                loadAutostart();
+            } else {
+                banner.classList.remove('hidden');
+                accepted.classList.add('hidden');
+                configCard.classList.add('hidden');
+                autostartBanner.classList.add('hidden');
+                document.getElementById('autostart-info-panel').classList.add('hidden');
+                document.getElementById('consent-info-panel').classList.add('hidden');
+                loadConsentDataPreview();
+            }
+        }
+
+        async function loadConsentDataPreview() {
+            const pre = document.getElementById('consent-data-preview');
+            if (!pre || pre.dataset.loaded) return;
+            try {
+                const resp = await fetch('/api/hardware-info');
+                const data = await resp.json();
+                pre.textContent = JSON.stringify(data, null, 2);
+                pre.dataset.loaded = 'true';
+            } catch (e) {
+                pre.textContent = 'Failed to load: ' + e.message;
+            }
+        }
+
+        async function toggleConsentInfo() {
+            const panel = document.getElementById('consent-info-panel');
+            panel.classList.toggle('hidden');
+            document.querySelector('#consent-accepted .btn-info').classList.toggle('active', !panel.classList.contains('hidden'));
+            if (!panel.classList.contains('hidden')) {
+                const pre = document.getElementById('consent-info-preview');
+                if (!pre.dataset.loaded) {
+                    try {
+                        const resp = await fetch('/api/hardware-info');
+                        const data = await resp.json();
+                        pre.textContent = JSON.stringify(data, null, 2);
+                        pre.dataset.loaded = 'true';
+                    } catch (e) {
+                        pre.textContent = 'Failed to load: ' + e.message;
+                    }
+                }
+            }
+        }
+
+        let configLoaded = false;
+        function updateConfigForm(config) {
+            if (configLoaded) return;
+            const roleSelect = document.getElementById('cfg-role');
+            if (roleSelect && config.preferred_role) {
+                roleSelect.value = config.preferred_role;
+            }
+            configLoaded = true;
+        }
+
+        let rolesLoaded = false;
+        async function loadRoles(currentRole) {
+            if (rolesLoaded) return;
+            try {
+                const resp = await fetch('/api/roles');
+                const roles = await resp.json();
+                const roleSelect = document.getElementById('cfg-role');
+                const roleDetails = document.getElementById('role-details');
+                const noRolesBanner = document.getElementById('no-roles-banner');
+                const roleForm = document.getElementById('role-form');
+
+                roleSelect.innerHTML = '';
+
+                if (!roles || roles.length === 0) {
+                    noRolesBanner.classList.remove('hidden');
+                    roleForm.classList.add('hidden');
+                    return;
+                }
+
+                const hasEligible = roles.some(r => r.eligible);
+                if (!hasEligible) {
+                    noRolesBanner.classList.remove('hidden');
+                    roleForm.classList.add('hidden');
+                    // Still show roles as disabled for information
+                    roleDetails.innerHTML = '<p style="color:#888;margin-top:0.5rem;">Available roles (all require more VRAM):</p><ul style="color:#888;font-size:0.85rem;">' +
+                        roles.map(r => '<li>' + r.role + ' — requires ' + (r.min_vram_mb >= 1024 ? (r.min_vram_mb / 1024).toFixed(0) + ' GB' : r.min_vram_mb + ' MB') + ' VRAM (' + r.model + ' ' + r.quantisation + ')</li>').join('') +
+                        '</ul>';
+                    roleDetails.parentElement.appendChild(roleDetails);
+                    noRolesBanner.after(roleDetails);
+                    roleDetails.classList = 'role-details';
+                    return;
+                }
+
+                noRolesBanner.classList.add('hidden');
+                roleForm.classList.remove('hidden');
+
+                // Add "Any eligible" option
+                const anyOpt = document.createElement('option');
+                anyOpt.value = 'any';
+                anyOpt.textContent = 'Any eligible role';
+                roleSelect.appendChild(anyOpt);
+
+                for (const role of roles) {
+                    const opt = document.createElement('option');
+                    opt.value = role.role;
+                    opt.textContent = role.role.charAt(0).toUpperCase() + role.role.slice(1);
+                    if (!role.eligible) {
+                        opt.disabled = true;
+                        opt.textContent += ' (requires ' + (role.min_vram_mb >= 1024 ? (role.min_vram_mb / 1024).toFixed(0) + ' GB' : role.min_vram_mb + ' MB') + ' VRAM)';
+                    }
+                    roleSelect.appendChild(opt);
+                }
+
+                if (currentRole) {
+                    roleSelect.value = currentRole;
+                }
+
+                // Show role details on change
+                roleSelect.addEventListener('change', () => updateRoleDetails(roles, roleSelect.value));
+                updateRoleDetails(roles, roleSelect.value);
+                rolesLoaded = true;
+            } catch (e) {
+                // Silently fail — roles may not be available yet
+            }
+        }
+
+        function updateRoleDetails(roles, selected) {
+            const details = document.getElementById('role-details');
+            if (selected === 'any') {
+                const eligible = roles.filter(r => r.eligible);
+                details.innerHTML = '<p style="color:#aaa;font-size:0.85rem;margin-top:0.5rem;">Eligible for: ' + eligible.map(r => r.role).join(', ') + '</p>';
+                return;
+            }
+            const role = roles.find(r => r.role === selected);
+            if (role) {
+                details.innerHTML = '<p style="color:#aaa;font-size:0.85rem;margin-top:0.5rem;">' + role.description + '<br>Model: ' + role.model + ' (' + role.quantisation + ') — min ' + (role.min_vram_mb >= 1024 ? (role.min_vram_mb / 1024).toFixed(0) + ' GB' : role.min_vram_mb + ' MB') + ' VRAM</p>';
+            } else {
+                details.innerHTML = '';
+            }
+        }
+
+        async function acceptConsent() {
+            await fetch('/api/consent', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({accepted: true, hardware_stats: true, config_preferences: true})
+            });
+            refresh();
+        }
+
+        async function revokeConsent() {
+            if (!confirm('Revoke consent? The cluster manager will stop sending work units to this worker.')) return;
+            await fetch('/api/consent', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({accepted: false, hardware_stats: false, config_preferences: false})
+            });
+            configLoaded = false;
+            refresh();
+        }
+
+        async function saveConfig() {
+            const config = {
+                preferred_role: document.getElementById('cfg-role').value
+            };
+            const resp = await fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            });
+            if (resp.ok) {
+                alert('Configuration saved and synced with manager.');
+            } else {
+                const err = await resp.text();
+                alert('Failed to save: ' + err);
+            }
+        }
+
+        function formatUptime(seconds) {
+            if (!seconds) return '—';
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            if (h > 0) return h + 'h ' + m + 'm';
+            if (m > 0) return m + 'm ' + s + 's';
+            return s + 's';
+        }
+
+        async function loadAutostart() {
+            try {
+                const resp = await fetch('/api/autostart');
+                const data = await resp.json();
+                const banner = document.getElementById('autostart-banner');
+                if (data.supported) {
+                    document.getElementById('autostart-toggle').checked = data.enabled;
+                    updateAutostartStyle(data.enabled);
+                    if (data.executable) {
+                        document.getElementById('autostart-path').textContent = data.executable;
+                    }
+                } else {
+                    banner.classList.add('hidden');
+                }
+            } catch (e) {
+                // Silently fail
+            }
+        }
+
+        function toggleAutostartInfo() {
+            const panel = document.getElementById('autostart-info-panel');
+            panel.classList.toggle('hidden');
+            document.querySelector('#autostart-banner .btn-info').classList.toggle('active', !panel.classList.contains('hidden'));
+        }
+
+        function updateAutostartStyle(enabled) {
+            const banner = document.getElementById('autostart-banner');
+            if (enabled) {
+                banner.classList.add('enabled');
+            } else {
+                banner.classList.remove('enabled');
+            }
+        }
+
+        async function toggleAutostart(enabled) {
+            try {
+                const resp = await fetch('/api/autostart', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({enabled: enabled})
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    alert('Failed to toggle autostart: ' + (err.error || 'unknown error'));
+                    document.getElementById('autostart-toggle').checked = !enabled;
+                } else {
+                    const data = await resp.json();
+                    document.getElementById('autostart-toggle').checked = data.enabled;
+                    updateAutostartStyle(data.enabled);
+                }
+            } catch (e) {
+                alert('Failed to toggle autostart: ' + e.message);
+                document.getElementById('autostart-toggle').checked = !enabled;
+            }
+        }
+
+        refresh();
+        setInterval(refresh, 3000);
+    </script>
+</body>
+</html>

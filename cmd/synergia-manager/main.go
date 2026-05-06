@@ -1,0 +1,270 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+	"github.com/ylallemant/synergia/internal/manager/api"
+	"github.com/ylallemant/synergia/internal/manager/config"
+	"github.com/ylallemant/synergia/internal/manager/gateway"
+	"github.com/ylallemant/synergia/internal/manager/latency"
+	"github.com/ylallemant/synergia/internal/manager/models"
+	"github.com/ylallemant/synergia/internal/manager/queue"
+	adminsrv "github.com/ylallemant/synergia/internal/manager/server"
+	"github.com/ylallemant/synergia/internal/manager/store"
+)
+
+func initLogger() {
+	noColor := true
+	if fi, err := os.Stdout.Stat(); err == nil {
+		noColor = (fi.Mode() & os.ModeCharDevice) == 0
+	}
+
+	output := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339, NoColor: noColor}
+	output.FormatLevel = func(i interface{}) string {
+		return strings.ToUpper(fmt.Sprintf("| %-6s|", i))
+	}
+	zerolog.CallerMarshalFunc = func(pc uintptr, file string, line int) string {
+		return filepath.Base(file) + ":" + strconv.Itoa(line)
+	}
+
+	level := zerolog.InfoLevel
+	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
+		if parsed, err := zerolog.ParseLevel(strings.ToLower(lvl)); err == nil {
+			level = parsed
+		}
+	}
+	zerolog.SetGlobalLevel(level)
+
+	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
+}
+
+func main() {
+	initLogger()
+
+	// Parse CLI flags
+	for _, arg := range os.Args[1:] {
+		if arg == "--development" || arg == "-development" {
+			os.Setenv("CLUSTER_DEVELOPMENT", "true")
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal().Err(err).Msg("configuration error")
+	}
+
+	// Initialize components
+	var db *store.Store
+	if cfg.DBDSN != "" {
+		db, err = store.OpenPostgres(cfg.DBDSN)
+	} else {
+		db, err = store.Open(cfg.DBPath)
+	}
+	if err != nil {
+		log.Fatal().Err(err).Msg("database error")
+	}
+
+	// Seed role-model mappings
+	if cfg.TestSetup {
+		log.Warn().Msg("test-setup mode — seeding role-model mappings with minimal test models")
+		log.Debug().Msg("test-setup: all roles use SmolLM2-135M-Instruct with 512 MB min VRAM — real production roles require 4-20 GB")
+		log.Debug().Msg("test-setup: production roles are embedding=bge-m3(4GB), inference=mistral-nemo-12b(10GB), ingestion=mistral-small-3.1-24b(20GB)")
+		if err := db.SeedTestRoles(); err != nil {
+			log.Fatal().Err(err).Msg("failed to seed test roles")
+		}
+	} else {
+		// Seed production roles if none exist yet
+		roles, _ := db.GetRoleModels()
+		if len(roles) == 0 {
+			log.Info().Msg("no role-model mappings found — seeding production defaults")
+			if err := db.SeedProductionRoles(); err != nil {
+				log.Fatal().Err(err).Msg("failed to seed production roles")
+			}
+		}
+	}
+
+	q := queue.New()
+	gw := gateway.New(cfg.WorkerKey, q, db)
+	completions := api.NewCompletionsHandler(cfg.APIKey, gw, q, db, cfg.Timeout)
+	synergiaAPI := api.NewSynergiaAPI(cfg.APIKey, db)
+	batchHandler := api.NewBatchHandler(cfg.APIKey, gw, q, db, cfg.Timeout, cfg.Development)
+
+	// Initialize model store
+	var modelStore models.Store
+	switch cfg.ModelBackend {
+	case "s3":
+		modelStore, err = models.NewS3Store(cfg.ModelS3Endpoint, cfg.ModelS3Bucket, cfg.ModelS3Region, cfg.ModelS3Key, cfg.ModelS3Secret, cfg.ModelS3SSL)
+	default:
+		modelStore, err = models.NewFilesystemStore(cfg.ModelPath)
+	}
+	if err != nil {
+		log.Fatal().Err(err).Msg("model store error")
+	}
+	modelsAPI := api.NewModelsDownloadAPI(cfg.WorkerKey, modelStore)
+
+	// Compute and store file hashes for any roles that have a model filename but no file hash yet
+	roles, _ := db.GetRoleModels()
+	for _, r := range roles {
+		if r.ModelFilename != "" && r.ModelFileHash == "" {
+			ctx := context.Background()
+			hash, hashErr := modelStore.FileHash(ctx, r.ModelFilename)
+			if hashErr != nil {
+				log.Warn().Err(hashErr).Str("role", r.Role).Str("filename", r.ModelFilename).Msg("could not compute model file hash")
+				continue
+			}
+			if err := db.UpsertRoleModel(r.Role, r.LLMModel, r.Quantisation, r.ModelFilename, hash, r.MinVRAMMB, r.Description); err != nil {
+				log.Warn().Err(err).Str("role", r.Role).Msg("failed to update model file hash")
+			} else {
+				log.Info().Str("role", r.Role).Str("hash", hash[:16]+"...").Msg("model file hash computed and stored")
+			}
+		}
+	}
+
+	consentAPI := api.NewConsentAPI(cfg.WorkerKey, db)
+	brandingAPI := api.NewBrandingAPI(cfg.APIKey, cfg.WorkerKey, db)
+	rolesAPI := api.NewRolesAPI(cfg.APIKey, cfg.WorkerKey, db, cfg.TestSetup)
+	rolesAPI.SetGateway(gw)
+	rolesAPI.SetModelStore(modelStore)
+	errorsAPI := api.NewErrorsAPI(cfg.WorkerKey, db)
+
+	// Initialize latency monitor
+	latencyMonitor := latency.New(db, cfg.LatencyBuckets, cfg.LatencyWindowHours)
+	defer latencyMonitor.Stop()
+	defer batchHandler.Stop()
+	latencyAPI := api.NewLatencyAPI(cfg.APIKey, latencyMonitor)
+
+	// Make latency monitor available to completions handler
+	completions.SetLatencyMonitor(latencyMonitor)
+	batchHandler.SetLatencyMonitor(latencyMonitor)
+
+	// Set up routes
+	mux := http.NewServeMux()
+
+	// OpenAI-compatible endpoints (called by Flow Engine)
+	mux.Handle("/v1/chat/completions", completions)
+	mux.Handle("/v1/batches/", batchHandler)
+	mux.Handle("/v1/batches", batchHandler)
+	mux.HandleFunc("/v1/models", synergiaAPI.ModelsHandler)
+
+	// Cluster management API
+	mux.HandleFunc("/v1/workers", synergiaAPI.WorkersHandler)
+	mux.HandleFunc("/v1/work-units", synergiaAPI.WorkUnitsHandler)
+	mux.HandleFunc("/v1/stats", synergiaAPI.StatsHandler)
+
+	// Worker consent and configuration API (authenticated with worker key)
+	mux.HandleFunc("/v1/consent", consentAPI.ConsentHandler)
+	mux.HandleFunc("/v1/worker-config", consentAPI.ConfigHandler)
+
+	// Roles API (eligible roles for workers, admin management)
+	mux.HandleFunc("/v1/roles", rolesAPI.RolesHandler)
+	mux.HandleFunc("/v1/admin/roles", rolesAPI.AdminRolesHandler)
+
+	// Branding API (CSS customization)
+	mux.HandleFunc("/v1/branding/style.css", brandingAPI.StyleHandler)
+	mux.HandleFunc("/v1/admin/branding/css", brandingAPI.AdminUpdateHandler)
+
+	// Model download API (authenticated with worker key)
+	mux.HandleFunc("/v1/models/files", modelsAPI.ListModelsHandler)
+	mux.HandleFunc("/v1/models/download/", modelsAPI.DownloadHandler)
+
+	// Client error reporting API (authenticated with worker key)
+	mux.HandleFunc("/v1/errors", errorsAPI.ErrorsHandler)
+
+	// Worker WebSocket gateway
+	mux.Handle("/ws/worker", gw)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		status := map[string]any{
+			"status":       "ok",
+			"worker_ready": gw.HasWorker(),
+		}
+		if info := gw.WorkerStatus(); info != nil {
+			status["worker"] = map[string]any{
+				"fingerprint":  info.Fingerprint,
+				"model":        info.Model,
+				"quantisation": info.Quantisation,
+				"connected_at": info.ConnectedAt.Format(time.RFC3339),
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","worker_ready":%v}`, gw.HasWorker())
+	})
+
+	server := &http.Server{
+		Addr:         cfg.ListenAddr,
+		Handler:      mux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: cfg.Timeout + 10*time.Second, // allow timeout + buffer
+		IdleTimeout:  120 * time.Second,
+	}
+
+	// Administration server (separate port)
+	adminServer := adminsrv.New(cfg.AdminAddr, cfg.APIKey, cfg.WorkerKey, db, cfg.Insecure, cfg.TLSCertFile, cfg.TLSKeyFile)
+	adminServer.HandleFunc("/v1/latency", latencyAPI.LatencyHandler)
+	adminServer.HandleFunc("/v1/latency/config", latencyAPI.ConfigHandler)
+
+	// Graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if cfg.Insecure {
+		log.Warn().Msg("TLS disabled — running in insecure mode (traffic is unencrypted)")
+	} else {
+		// Start HTTP→HTTPS redirect server if configured
+		httpRedirectAddr := os.Getenv("CLUSTER_HTTP_REDIRECT_ADDR")
+		if httpRedirectAddr != "" {
+			go func() {
+				redirectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					target := "https://" + r.Host + r.URL.RequestURI()
+					log.Debug().Str("from", r.URL.String()).Str("to", target).Str("remote", r.RemoteAddr).Msg("redirecting HTTP to HTTPS")
+					http.Redirect(w, r, target, http.StatusMovedPermanently)
+				})
+				redirectServer := &http.Server{
+					Addr:    httpRedirectAddr,
+					Handler: redirectHandler,
+				}
+				log.Info().Str("addr", httpRedirectAddr).Msg("HTTP redirect server starting (redirects to HTTPS)")
+				if err := redirectServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Warn().Err(err).Msg("HTTP redirect server error")
+				}
+			}()
+		}
+	}
+
+	go func() {
+		log.Info().Str("addr", cfg.ListenAddr).Bool("tls", !cfg.Insecure).Msg("cluster manager starting")
+		var err error
+		if cfg.Insecure {
+			err = server.ListenAndServe()
+		} else {
+			err = server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+		}
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("server error")
+		}
+	}()
+
+	go adminServer.Run(ctx)
+
+	<-ctx.Done()
+	log.Info().Msg("shutting down...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Error().Err(err).Msg("shutdown error")
+	}
+
+	log.Info().Msg("cluster manager stopped")
+}

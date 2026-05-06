@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ── synergia-client (all OS/arch) ─────────────────────────────────
+  build-client:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: 1
+            tags: ""
+            artifact: synergia-client-linux-amd64
+            deps: sudo apt-get update && sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cgo: 0
+            tags: ""
+            artifact: synergia-client-linux-arm64
+            deps: ""
+          - os: macos-13
+            goos: darwin
+            goarch: amd64
+            cgo: 1
+            tags: ""
+            artifact: synergia-client-darwin-amd64
+            deps: ""
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            cgo: 1
+            tags: ""
+            artifact: synergia-client-darwin-arm64
+            deps: ""
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            cgo: 1
+            tags: ""
+            artifact: synergia-client-windows-amd64.exe
+            deps: ""
+          - os: windows-latest
+            goos: windows
+            goarch: arm64
+            cgo: 0
+            tags: ""
+            artifact: synergia-client-windows-arm64.exe
+            deps: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Install system dependencies
+        if: matrix.deps != ''
+        run: ${{ matrix.deps }}
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          LDFLAGS="-s -w -X github.com/ylallemant/synergia/internal/client/version.Version=${VERSION}"
+          TAGS="${{ matrix.tags }}"
+          if [ -n "$TAGS" ]; then
+            go build -tags "$TAGS" -ldflags="${LDFLAGS}" -o dist/${{ matrix.artifact }} ./cmd/synergia-client
+          else
+            go build -ldflags="${LDFLAGS}" -o dist/${{ matrix.artifact }} ./cmd/synergia-client
+          fi
+        shell: bash
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.artifact }}
+
+  # ── synergia-manager (Linux binaries + container image) ───────────
+  build-manager:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ${{ github.repository }}/synergia-manager
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build binaries
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          LDFLAGS="-s -w"
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="${LDFLAGS}" -o dist/synergia-manager-linux-amd64 ./cmd/synergia-manager
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="${LDFLAGS}" -o dist/synergia-manager-linux-arm64 ./cmd/synergia-manager
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/synergia-manager-linux-amd64
+            dist/synergia-manager-linux-arm64
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=
+
+      - name: Build and push container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

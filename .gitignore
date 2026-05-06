@@ -1,0 +1,32 @@
+# binaries
+/synergia-client
+/synergia-manager
+/dist/
+
+# test artifacts
+test/testdata/models/
+test/testdata/tls/
+test/runs/
+
+# OS
+**/.DS_Store
+**/Thumbs.db
+
+# editors
+.idea/
+.vscode/
+.history/
+
+# helm
+**/.charts
+
+# secret protection
+**/*.env
+**/ovh.conf
+
+# Build output directories
+bin/
+dist/
+
+# Test output directories
+**/test/output/
