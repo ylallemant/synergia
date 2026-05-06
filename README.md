@@ -2,7 +2,7 @@
 
 Community-powered distributed LLM inference cluster.
 
-A BOINC-inspired volunteer GPU compute mesh that turns idle GPUs into a shared inference network. Participants run a lightweight client daemon that connects to a central manager, receives LLM work units, and returns results — all behind a standard OpenAI-compatible API.
+A SETI@home-inspired volunteer GPU compute mesh that turns idle GPUs into a shared inference network. Participants run a lightweight client daemon that connects to a central manager, receives LLM work units, and returns results — all behind a standard OpenAI-compatible API.
 
 > [!NOTE]
 > **Synergia** (Greek: *collective work*) is the distributed compute subsystem of [Sophia](https://github.com/ylallemant/sophia), an LLM-wiki platform whose name means *wisdom/knowledge*. The pairing reads as "wisdom and knowledge through cooperation" — Sophia defines the goal, Synergia provides the means.
