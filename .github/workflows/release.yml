@@ -31,13 +31,6 @@ jobs:
             tags: ""
             artifact: synergia-client-linux-arm64
             deps: ""
-          - os: macos-13
-            goos: darwin
-            goarch: amd64
-            cgo: 1
-            tags: ""
-            artifact: synergia-client-darwin-amd64
-            deps: ""
           - os: macos-latest
             goos: darwin
             goarch: arm64
