@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/rs/zerolog/log"
 	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
