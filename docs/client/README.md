@@ -32,6 +32,9 @@ Minimal implementation: connects to a single cluster manager, shells out to a lo
 - **Branding**: fetches custom CSS from cluster manager with periodic refresh and disk cache
 - **Error reporting**: catches errors and panics during work unit processing, deduplicates by message hash (1-hour cooldown), reports to manager via `POST /v1/errors` with version and stack trace
 - **Client version**: reports version to manager via `X-Worker-Version` header on WebSocket connection
+- **Platform reporting**: reports `X-Worker-OS` and `X-Worker-Arch` headers (`runtime.GOOS`/`runtime.GOARCH`) on WebSocket connect, enabling the manager to resolve platform-specific binary artifacts
+- **Binary auto-update**: receives `binary_update` push from manager, downloads new binary (GitHub releases with manager proxy fallback), verifies SHA256, self-replaces with atomic rename (Unix) or helper shim (Windows), restarts. Previous binary kept as `.bak` for rollback if reconnect fails within 60s
+- **Windows update helper**: separate `synergia-updater.exe` handles locked-file replacement on Windows. Downloaded from the same release on first need; version kept in sync with client
 
 ### Out of Scope (Phase 2+)
 

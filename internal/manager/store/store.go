@@ -41,7 +41,7 @@ func OpenPostgres(dsn string) (*Store, error) {
 }
 
 func migrate(db *gorm.DB, driver, info string) (*Store, error) {
-	if err := db.AutoMigrate(&Worker{}, &WorkUnit{}, &WorkerConsent{}, &WorkerConfig{}, &BrandingConfig{}, &RoleModel{}, &ClientError{}, &BatchRequest{}, &LatencySample{}, &LatencyHourlyStat{}); err != nil {
+	if err := db.AutoMigrate(&Worker{}, &WorkUnit{}, &WorkerConsent{}, &WorkerConfig{}, &BrandingConfig{}, &RoleModel{}, &ClientError{}, &BatchRequest{}, &LatencySample{}, &LatencyHourlyStat{}, &ClientVersionConfig{}); err != nil {
 		return nil, fmt.Errorf("migration failed: %w", err)
 	}
 
@@ -50,7 +50,7 @@ func migrate(db *gorm.DB, driver, info string) (*Store, error) {
 }
 
 // UpsertWorker creates or updates a worker record on connection.
-func (s *Store) UpsertWorker(fingerprint, publicKey, model, quantisation, clientVersion string) error {
+func (s *Store) UpsertWorker(fingerprint, publicKey, model, quantisation, clientVersion, os, arch string) error {
 	var worker Worker
 	result := s.DB.Where("fingerprint = ?", fingerprint).First(&worker)
 
@@ -61,6 +61,8 @@ func (s *Store) UpsertWorker(fingerprint, publicKey, model, quantisation, client
 			LLMModel:      model,
 			Quantisation:  quantisation,
 			ClientVersion: clientVersion,
+			OS:            os,
+			Arch:          arch,
 			TrustScore:    0,
 			LastSeenAt:    time.Now(),
 			Status:        "online",
@@ -76,6 +78,8 @@ func (s *Store) UpsertWorker(fingerprint, publicKey, model, quantisation, client
 		"llm_model":      model,
 		"quantisation":   quantisation,
 		"client_version": clientVersion,
+		"os":             os,
+		"arch":           arch,
 		"last_seen_at":   time.Now(),
 	}).Error
 }
@@ -733,4 +737,64 @@ func (s *Store) GetRoleModel(role string) (*RoleModel, error) {
 		return nil, result.Error
 	}
 	return &rm, nil
+}
+
+// GetClientVersionConfig retrieves the current target version config.
+func (s *Store) GetClientVersionConfig() (*ClientVersionConfig, error) {
+	var cfg ClientVersionConfig
+	result := s.DB.First(&cfg)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &cfg, nil
+}
+
+// SetClientVersionConfig creates or updates the target client version config.
+func (s *Store) SetClientVersionConfig(version, rolloutMode string, rolloutPercentage int) error {
+	var cfg ClientVersionConfig
+	result := s.DB.First(&cfg)
+
+	if result.Error == gorm.ErrRecordNotFound {
+		cfg = ClientVersionConfig{
+			TargetVersion:     version,
+			RolloutMode:       rolloutMode,
+			RolloutPercentage: rolloutPercentage,
+			UpdatedAt:         time.Now(),
+		}
+		return s.DB.Create(&cfg).Error
+	}
+
+	if result.Error != nil {
+		return result.Error
+	}
+
+	return s.DB.Model(&cfg).Updates(map[string]any{
+		"target_version":     version,
+		"rollout_mode":       rolloutMode,
+		"rollout_percentage": rolloutPercentage,
+		"updated_at":         time.Now(),
+	}).Error
+}
+
+// UpdateWorkerBinarySyncStatus sets binary_sync_status based on version comparison.
+func (s *Store) UpdateWorkerBinarySyncStatus(fingerprint, targetVersion string) string {
+	var worker Worker
+	if err := s.DB.Where("fingerprint = ?", fingerprint).First(&worker).Error; err != nil {
+		return "out-of-sync"
+	}
+
+	status := "out-of-sync"
+	if worker.ClientVersion == targetVersion {
+		status = "synced"
+	}
+
+	s.DB.Model(&worker).Update("binary_sync_status", status)
+	return status
+}
+
+// GetOutdatedWorkers returns connected workers whose version != target.
+func (s *Store) GetOutdatedWorkers(targetVersion string) ([]Worker, error) {
+	var workers []Worker
+	err := s.DB.Where("status != ? AND client_version != ?", "offline", targetVersion).Find(&workers).Error
+	return workers, err
 }

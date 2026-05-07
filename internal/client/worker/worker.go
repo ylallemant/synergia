@@ -17,6 +17,7 @@ import (
 	"github.com/ylallemant/synergia/internal/client/identity"
 	"github.com/ylallemant/synergia/internal/client/llm"
 	"github.com/ylallemant/synergia/internal/client/protocol"
+	"github.com/ylallemant/synergia/internal/client/updater"
 )
 
 // Trigger payloads for testing error reporting.
@@ -65,6 +66,8 @@ type Worker struct {
 	pause          PauseChecker
 	reporter       ErrorReporter
 	consent        ConsentChecker
+	updater        *updater.Updater
+	restartFn      func() // called after successful binary update
 	role           string
 	modelsDir      string
 	managerHTTPURL string
@@ -93,6 +96,12 @@ func (w *Worker) SetModelDownloadConfig(role, modelsDir, managerHTTPURL, workerK
 	w.workerKey = workerKey
 }
 
+// SetUpdater configures the binary auto-updater. restartFn is called after a successful update.
+func (w *Worker) SetUpdater(u *updater.Updater, restartFn func()) {
+	w.updater = u
+	w.restartFn = restartFn
+}
+
 // Run starts the work processing loop. Blocks until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
 	log.Info().Msg("worker processing loop started")
@@ -108,6 +117,9 @@ func (w *Worker) Run(ctx context.Context) {
 
 		case mu := <-w.conn.ModelUpdateCh:
 			w.handleModelUpdate(mu)
+
+		case bu := <-w.conn.BinaryUpdateCh:
+			w.handleBinaryUpdate(bu)
 
 		case change := <-w.monitor.StateChangeCh:
 			w.handleStateChange(change)
@@ -434,4 +446,37 @@ func detectTrigger(wu *protocol.WorkUnit) string {
 		}
 	}
 	return ""
+}
+
+func (w *Worker) handleBinaryUpdate(bu *protocol.BinaryUpdate) {
+	if w.updater == nil {
+		log.Warn().Msg("received binary update but no updater configured")
+		return
+	}
+
+	log.Info().
+		Str("version", bu.Version).
+		Msg("received binary update notification")
+
+	if err := w.conn.SendStatus("updating"); err != nil {
+		log.Warn().Err(err).Msg("failed to send updating status")
+	}
+
+	replaced, err := w.updater.Apply(bu)
+	if err != nil {
+		log.Error().Err(err).Msg("binary update failed")
+		if w.reporter != nil {
+			w.reporter.Report(err)
+		}
+		_ = w.conn.SendStatus("available")
+		return
+	}
+
+	if replaced && w.restartFn != nil {
+		log.Info().Msg("binary replaced — triggering restart")
+		w.restartFn()
+		return
+	}
+
+	_ = w.conn.SendStatus("available")
 }

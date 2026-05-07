@@ -881,8 +881,52 @@ func main() {
 		log.Warn().Msg("workers.total_requests is 0")
 	}
 
-	// --- Step 20: Collect output ---
-	step("20. Collecting output")
+	// --- Step 20: Version admin API ---
+	step("20. Testing version admin API")
+	{
+		// POST a target version
+		versionPayload := `{"target_version":"v99.0.0-test","rollout_mode":"all","rollout_percentage":100,"sha256":""}`
+		versionReq, _ := http.NewRequest(http.MethodPost, "https://"+managerAddr+"/v1/admin/version", bytes.NewBufferString(versionPayload))
+		versionReq.Header.Set("Authorization", "Bearer "+apiKey)
+		versionReq.Header.Set("Content-Type", "application/json")
+		versionResp, err := http.DefaultClient.Do(versionReq)
+		if err != nil {
+			fatal("version POST failed: %v", err)
+		}
+		versionResp.Body.Close()
+		if versionResp.StatusCode != http.StatusOK {
+			fatal("version POST returned %d", versionResp.StatusCode)
+		}
+		pass("POST /v1/admin/version → 200")
+
+		// GET the config back
+		versionGetResp, err := apiGet("https://"+managerAddr+"/v1/admin/version", apiKey)
+		if err != nil {
+			fatal("version GET failed: %v", err)
+		}
+		if !strings.Contains(versionGetResp, "v99.0.0-test") {
+			fatal("version GET did not return expected version: %s", versionGetResp)
+		}
+		pass("GET /v1/admin/version → target_version=v99.0.0-test")
+
+		// Verify binary_update was pushed to worker (it will fail to download, but we see the log)
+		if err := waitForLog(clientLogs, "binary update received", 10*time.Second); err != nil {
+			log.Warn().Msg("binary_update not received by client (may be expected if version matches)")
+		} else {
+			pass("Client received binary_update push")
+		}
+
+		// Verify worker has OS/Arch in DB
+		workerOSCount := querySQLiteCount(dbPath, "SELECT COUNT(*) FROM workers WHERE os != '' AND arch != ''")
+		if workerOSCount > 0 {
+			pass("Worker has OS/Arch stored in DB")
+		} else {
+			log.Warn().Msg("Worker OS/Arch not stored in DB")
+		}
+	}
+
+	// --- Step 21: Collect output ---
+	step("21. Collecting output")
 	writeOutput(filepath.Join(dataDir, "completion-response.json"), []byte(completionResp))
 	writeOutput(filepath.Join(dataDir, "stats.json"), []byte(statsResp))
 	writeOutput(filepath.Join(dataDir, "workers.json"), []byte(workersResp))

@@ -19,18 +19,21 @@ func ComputeLLMHash(role, modelFileHash string) string {
 // Worker represents a registered worker in the cluster.
 type Worker struct {
 	gorm.Model
-	Fingerprint    string `gorm:"uniqueIndex;size:64"`
-	PublicKey      string `gorm:"size:88"` // base64-encoded Ed25519 public key
-	LLMModel       string `gorm:"column:llm_model"`
-	Quantisation   string
-	ClientVersion  string `gorm:"size:32"`
-	LLMHash        string `gorm:"size:64"`                     // SHA256 hash of role:model_file_hash reported by the worker
-	SyncStatus     string `gorm:"size:20;default:out-of-sync"` // synced, out-of-sync (manager-derived from llmHash comparison)
-	TrustScore     int    `gorm:"default:0"`
-	TotalRequests  int64  `gorm:"default:0"`
-	TotalLatencyMs int64  `gorm:"default:0"`
-	LastSeenAt     time.Time
-	Status         string `gorm:"default:offline;size:20"` // available, processing, updating, paused, idle, withdrawn, offline
+	Fingerprint      string `gorm:"uniqueIndex;size:64"`
+	PublicKey        string `gorm:"size:88"` // base64-encoded Ed25519 public key
+	LLMModel         string `gorm:"column:llm_model"`
+	Quantisation     string
+	ClientVersion    string `gorm:"size:32"`
+	OS               string `gorm:"size:20"`
+	Arch             string `gorm:"size:20"`
+	LLMHash          string `gorm:"size:64"`                     // SHA256 hash of role:model_file_hash reported by the worker
+	SyncStatus       string `gorm:"size:20;default:out-of-sync"` // synced, out-of-sync (manager-derived from llmHash comparison)
+	BinarySyncStatus string `gorm:"size:20;default:out-of-sync"` // synced, out-of-sync (version comparison)
+	TrustScore       int    `gorm:"default:0"`
+	TotalRequests    int64  `gorm:"default:0"`
+	TotalLatencyMs   int64  `gorm:"default:0"`
+	LastSeenAt       time.Time
+	Status           string `gorm:"default:offline;size:20"` // available, processing, updating, paused, idle, withdrawn, offline
 }
 
 // WorkUnit records a dispatched work unit and its outcome.
@@ -148,4 +151,13 @@ type LatencyHourlyStat struct {
 	MinPayloadBytes  int
 	MaxPayloadBytes  int
 	MeanPayloadBytes int
+}
+
+// ClientVersionConfig stores the centrally managed target client version.
+type ClientVersionConfig struct {
+	ID                uint   `gorm:"primaryKey"`
+	TargetVersion     string `gorm:"size:32"`
+	RolloutMode       string `gorm:"size:20;default:all"` // "all" or "percentage"
+	RolloutPercentage int    `gorm:"default:100"`         // 0-100, used when mode=percentage
+	UpdatedAt         time.Time
 }

@@ -137,6 +137,7 @@ func main() {
 	rolesAPI.SetGateway(gw)
 	rolesAPI.SetModelStore(modelStore)
 	errorsAPI := api.NewErrorsAPI(cfg.WorkerKey, db)
+	versionAPI := api.NewVersionAPI(cfg.APIKey, db, gw)
 
 	// Initialize latency monitor
 	latencyMonitor := latency.New(db, cfg.LatencyBuckets, cfg.LatencyWindowHours)
@@ -173,6 +174,10 @@ func main() {
 	// Branding API (CSS customization)
 	mux.HandleFunc("/v1/branding/style.css", brandingAPI.StyleHandler)
 	mux.HandleFunc("/v1/admin/branding/css", brandingAPI.AdminUpdateHandler)
+
+	// Client version management API
+	mux.HandleFunc("/v1/admin/version", versionAPI.AdminVersionHandler)
+	mux.HandleFunc("/v1/binary/download", versionAPI.BinaryDownloadHandler)
 
 	// Model download API (authenticated with worker key)
 	mux.HandleFunc("/v1/models/files", modelsAPI.ListModelsHandler)

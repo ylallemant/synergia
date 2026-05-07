@@ -34,6 +34,10 @@ Minimal implementation: single worker, no trust system, no redundancy. The goal 
 - **Result signing** received (signature is passed through the protocol but not yet persisted in DB)
 - **Model update push**: when an admin updates a role-model mapping, the manager computes the expected `llmHash`, pushes a `model_update` message to connected workers for that role, and tracks their `sync_status` (`synced` / `out-of-sync`)
 - **Dual-status model**: each worker has a `status` (client-reported) and a `sync_status` (manager-derived from LLM hash comparison). Only workers with both `available` + `synced` receive work dispatch
+- **Binary auto-update push**: admin sets target client version via `POST /v1/admin/version`; manager resolves platform-specific download URLs from GitHub releases, computes SHA256 per artifact, pushes `binary_update` to outdated workers. Supports `all` or `percentage`-based rollout modes
+- **Binary download proxy** (`GET /v1/binary/download`): fetches and caches release binaries from GitHub, serves to workers behind firewalls that cannot reach GitHub directly
+- **Admin configuration UI** (`/admin/config` on admin port): unified page showing target client version, role-model matrix, and worker overview (fingerprint, OS/arch, version, sync status)
+- **Platform-aware worker registry**: stores `os` and `arch` (from `X-Worker-OS`/`X-Worker-Arch` headers) in the workers table for binary artifact resolution
 
 ### Out of Scope (Phase 2+)
 

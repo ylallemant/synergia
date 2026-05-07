@@ -1,7 +1,11 @@
 # binaries
-/synergia-client
+/synergia-client*
+/synergia-updater*
 /synergia-manager
-/dist/
+
+# Build output directories
+bin/
+dist/
 
 # test artifacts
 test/testdata/models/
@@ -17,16 +21,8 @@ test/runs/
 .vscode/
 .history/
 
-# helm
-**/.charts
-
 # secret protection
 **/*.env
-**/ovh.conf
-
-# Build output directories
-bin/
-dist/
 
 # Test output directories
 **/test/output/

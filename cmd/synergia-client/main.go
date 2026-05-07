@@ -31,6 +31,7 @@ import (
 	"github.com/ylallemant/synergia/internal/client/server"
 	"github.com/ylallemant/synergia/internal/client/status"
 	"github.com/ylallemant/synergia/internal/client/tray"
+	"github.com/ylallemant/synergia/internal/client/updater"
 	"github.com/ylallemant/synergia/internal/client/version"
 	"github.com/ylallemant/synergia/internal/client/worker"
 	"github.com/ylallemant/synergia/internal/client/workerconfig"
@@ -147,6 +148,13 @@ func main() {
 	sp := status.New(conn, monitor, llmClient, id, cfg.Model, cfg.Quantisation)
 	w := worker.New(conn, llmClient, id, monitor, sp, sp, sp, reporter, consentMgr)
 	w.SetModelDownloadConfig(cfg.Role, filepath.Dir(cfg.ModelFile), managerHTTPURL, cfg.WorkerKey)
+
+	// Configure binary auto-updater
+	binaryUpdater := updater.New(cfg.WorkerKey, managerHTTPURL)
+	w.SetUpdater(binaryUpdater, func() {
+		log.Info().Msg("restarting after binary update")
+		os.Exit(0) // systemd/launchd/autostart will restart the process
+	})
 	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr)
 	adminURL := localAdminURL(cfg.ManagerURL, cfg.WorkerKey)
 	t := tray.New(sp, "http://"+dashboardAddr+"/static/index.html", adminURL)

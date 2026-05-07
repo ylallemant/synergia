@@ -72,13 +72,15 @@ Downloads test models automatically on first run, starts manager + client + llam
 - **WebSocket gateway** — workers connect outbound (NAT/firewall-friendly)
 - **Dual-status model** — client_status (worker-reported) + sync_status (manager-derived)
 - **Model update push** — admin updates role→model mapping, workers auto-download
+- **Binary auto-update** — centrally managed client version, GitHub releases + manager proxy fallback
 - **LLM hash verification** — SHA256(role + ":" + SHA256(model_file)) ensures model integrity
 - **GPU activity monitoring** — detects external GPU usage, pauses inference
 - **Batch queue** — async batch API for when no workers are immediately available
 - **Latency monitoring** — per-role adaptive bucketing with p50/p95/p99 percentiles
 - **Worker consent** — interactive data collection consent, gated work dispatch
-- **Auto-start** — macOS LaunchAgent, Linux systemd user service
+- **Auto-start** — macOS LaunchAgent, Linux systemd user service, Windows Registry
 - **System tray** — connection state icon with Pause/Resume/Quit menu
+- **Admin configuration UI** — version management, role-model matrix, worker overview
 - **Multi-platform** — Linux/macOS/Windows, amd64/arm64
 
 ## GPU Platform Support

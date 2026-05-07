@@ -11,6 +11,7 @@ const (
 	TypeStatus        = "status"
 	TypeModelUpdate   = "model_update"    // manager → worker: new model configuration
 	TypeLLMHashReport = "llm_hash_report" // worker → manager: report current LLM hash
+	TypeBinaryUpdate  = "binary_update"   // manager → worker: new client binary available
 )
 
 // Envelope is the top-level WebSocket message wrapper.
@@ -83,6 +84,15 @@ type ModelUpdate struct {
 type LLMHashReport struct {
 	Type    string `json:"type"`
 	LLMHash string `json:"llm_hash"`
+}
+
+// BinaryUpdate is sent from manager to worker when a new client version is available.
+type BinaryUpdate struct {
+	Type        string `json:"type"`
+	Version     string `json:"version"`
+	DownloadURL string `json:"download_url"`
+	FallbackURL string `json:"fallback_url"` // manager proxy download endpoint
+	SHA256      string `json:"sha256"`
 }
 
 // ChatCompletionRequest mirrors the OpenAI API request format.

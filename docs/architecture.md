@@ -195,19 +195,21 @@ Single worker, no trust system, no redundancy. Validates the end-to-end path. **
 - Batch queue for async processing
 - Latency monitoring with adaptive bucketing
 - GPU contention detection
-- System tray integration (macOS/Linux)
+- System tray integration (macOS/Linux/Windows)
 - TLS with optional HTTP→HTTPS redirect
-- Auto-start (LaunchAgent / systemd)
+- Auto-start (LaunchAgent / systemd / Registry)
 - Error reporting pipeline
+- Binary auto-update (GitHub releases, manager proxy fallback, staged/full rollout)
+- Admin configuration UI (version, role-model matrix, worker overview)
 - Full integration test suite
 
 ### Phase 2: Multi-Worker
 
 - Trust scoring with redundancy
 - Canary system
-- Model auto-download from S3 (API exists, client doesn't pull yet)
 - mTLS certificates
-- Result signature verification
+- Result signature storage and verification
+- Multiple simultaneous workers
 
 ### Phase 3: Production
 
@@ -222,9 +224,41 @@ Single worker, no trust system, no redundancy. Validates the end-to-end path. **
 - Mobile support (high-end phones with NPUs)
 - P2P model distribution (BitTorrent-style)
 
+## Binary Auto-Update
+
+The manager centrally controls the target client version. When an admin sets a new version, the manager pushes `binary_update` messages to outdated workers. The flow mirrors the model update pipeline:
+
+```
+Admin sets version         Manager                              Worker
+      │                      │                                    │
+      │── POST /v1/admin/version ─▶│                              │
+      │   { "version": "0.2.0" }   │                              │
+      │                            │── binary_update ────────────▶│
+      │                            │   (version, url, fallback,   │
+      │                            │    sha256)                   │
+      │                            │                              │
+      │                            │◀── status: "updating" ───────│
+      │                            │                              │── download binary
+      │                            │                              │── verify SHA256
+      │                            │                              │── replace self + restart
+      │                            │                              │
+      │                            │◀── reconnect ────────────────│
+      │                            │    X-Worker-Version: 0.2.0   │
+```
+
+**Download strategy**: Workers first try GitHub releases directly (`https://github.com/ylallemant/synergia/releases/download/{version}/synergia-client-{os}-{arch}`). If that fails (corporate firewalls, rate limits), they fall back to the manager's proxy endpoint (`/v1/binary/download`).
+
+**Rollout modes**: The admin can choose `all` (push to every outdated worker immediately) or `percentage` (gradual rollout to N% of workers).
+
+**Platform awareness**: Workers report `X-Worker-OS` and `X-Worker-Arch` headers on connect. The manager uses these to resolve the correct binary artifact.
+
+**Windows**: A helper binary (`synergia-updater.exe`) handles the locked-file replacement. It's downloaded from the same release on first need, and kept version-synchronised with the client.
+
+**Rollback**: The previous binary is kept as `.bak`. If the new binary fails to reconnect within 60s, the auto-start mechanism restores the backup.
+
 ## Open Questions
 
-1. **Model updates**: How to roll out new model versions across 200 workers without disrupting processing? Gradual rollout with version pinning per work unit?
+1. ~~**Model updates**: How to roll out new model versions across 200 workers without disrupting processing?~~ Solved: gradual rollout with version pinning per work unit via role-model mapping + `binary_update` for client binaries.
 
 2. **Heterogeneous hardware**: Different quantisations produce slightly different results. Is semantic comparison sufficient?
 

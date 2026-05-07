@@ -28,6 +28,9 @@ type WorkerInfo struct {
 	PublicKey    ed25519.PublicKey
 	Model        string
 	Quantisation string
+	Version      string
+	OS           string
+	Arch         string
 	LLMHash      string
 	ConnectedAt  time.Time
 }
@@ -76,6 +79,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	quantisation := r.Header.Get("X-Worker-Quantisation")
 	clientVersion := r.Header.Get("X-Worker-Version")
 	llmHash := r.Header.Get("X-Worker-LLM-Hash")
+	workerOS := r.Header.Get("X-Worker-OS")
+	workerArch := r.Header.Get("X-Worker-Arch")
 
 	if fingerprint == "" || pubKeyB64 == "" {
 		http.Error(w, "X-Worker-Fingerprint and X-Worker-Public-Key headers required", http.StatusBadRequest)
@@ -122,6 +127,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			PublicKey:    pubKey,
 			Model:        model,
 			Quantisation: quantisation,
+			Version:      clientVersion,
+			OS:           workerOS,
+			Arch:         workerArch,
 			LLMHash:      llmHash,
 			ConnectedAt:  time.Now(),
 		},
@@ -138,7 +146,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Persist worker in DB
 	if g.store != nil {
-		if err := g.store.UpsertWorker(fingerprint, pubKeyB64, model, quantisation, clientVersion); err != nil {
+		if err := g.store.UpsertWorker(fingerprint, pubKeyB64, model, quantisation, clientVersion, workerOS, workerArch); err != nil {
 			log.Error().Err(err).Msg("failed to persist worker")
 		}
 		if llmHash != "" {
@@ -428,6 +436,32 @@ func (g *Gateway) PushModelUpdate(role, model, quantisation, filename, modelFile
 		Str("llm_hash", llmHash).
 		Str("fingerprint", wc.info.Fingerprint).
 		Msg("pushing model update to worker")
+
+	return wc.conn.WriteJSON(update)
+}
+
+// PushBinaryUpdate sends a binary update notification to the connected worker.
+func (g *Gateway) PushBinaryUpdate(version, downloadURL, fallbackURL, sha256 string) error {
+	g.mu.RLock()
+	wc := g.worker
+	g.mu.RUnlock()
+
+	if wc == nil {
+		return fmt.Errorf("no worker connected")
+	}
+
+	update := &protocol.BinaryUpdate{
+		Type:        protocol.TypeBinaryUpdate,
+		Version:     version,
+		DownloadURL: downloadURL,
+		FallbackURL: fallbackURL,
+		SHA256:      sha256,
+	}
+
+	log.Info().
+		Str("version", version).
+		Str("fingerprint", wc.info.Fingerprint).
+		Msg("pushing binary update to worker")
 
 	return wc.conn.WriteJSON(update)
 }

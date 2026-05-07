@@ -199,6 +199,17 @@ func (s *Server) collectData() dashboardData {
 		})
 	}
 
+	// Binary version config
+	if cfg, err := s.store.GetClientVersionConfig(); err == nil {
+		data.VersionTarget = cfg.TargetVersion
+		data.VersionRolloutMode = cfg.RolloutMode
+		data.VersionPercentage = cfg.RolloutPercentage
+	}
+	if data.VersionTarget != "" {
+		s.store.DB.Model(&store.Worker{}).Where("status != ? AND client_version = ?", "offline", data.VersionTarget).Count(&data.WorkersSynced)
+		s.store.DB.Model(&store.Worker{}).Where("status != ? AND client_version != ?", "offline", data.VersionTarget).Count(&data.WorkersOutdated)
+	}
+
 	data.GeneratedAt = time.Now().Format("2006-01-02 15:04:05 MST")
 	return data
 }
@@ -224,6 +235,11 @@ type dashboardData struct {
 	TodayFailed        int64
 	RoleWorkCounts     []roleWorkCount
 	Errors             []errorEntry
+	VersionTarget      string
+	VersionRolloutMode string
+	VersionPercentage  int
+	WorkersSynced      int64
+	WorkersOutdated    int64
 	GeneratedAt        string
 }
 

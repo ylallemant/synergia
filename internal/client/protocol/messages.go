@@ -39,6 +39,7 @@ const (
 	TypeHeartbeat     = "heartbeat"
 	TypeStatus        = "status"
 	TypeModelUpdate   = "model_update"    // manager → worker: new model configuration
+	TypeBinaryUpdate  = "binary_update"   // manager → worker: new client binary available
 	TypeLLMHashReport = "llm_hash_report" // worker → manager: report current LLM hash
 )
 
@@ -111,6 +112,15 @@ type ModelUpdate struct {
 type LLMHashReport struct {
 	Type    string `json:"type"`
 	LLMHash string `json:"llm_hash"`
+}
+
+// BinaryUpdate is received from the cluster manager when a new client version is available.
+type BinaryUpdate struct {
+	Type        string `json:"type"`
+	Version     string `json:"version"`
+	DownloadURL string `json:"download_url"` // primary: GitHub release URL
+	FallbackURL string `json:"fallback_url"` // fallback: manager proxy URL
+	SHA256      string `json:"sha256"`       // expected hash of the binary
 }
 
 // ChatCompletionRequest is the payload sent to the local llama-server.

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
@@ -32,11 +33,12 @@ type Connection struct {
 	conn *websocket.Conn
 
 	// Channels for incoming messages
-	WorkUnitCh    chan *protocol.WorkUnit
-	ModelUpdateCh chan *protocol.ModelUpdate
-	done          chan struct{}
-	connectedCh   chan struct{} // closed on first successful connection
-	connOnce      sync.Once
+	WorkUnitCh     chan *protocol.WorkUnit
+	ModelUpdateCh  chan *protocol.ModelUpdate
+	BinaryUpdateCh chan *protocol.BinaryUpdate
+	done           chan struct{}
+	connectedCh    chan struct{} // closed on first successful connection
+	connOnce       sync.Once
 }
 
 func New(url, workerKey string, id *identity.Identity, model, quantisation, tlsCACert string) *Connection {
@@ -60,16 +62,17 @@ func New(url, workerKey string, id *identity.Identity, model, quantisation, tlsC
 	}
 
 	return &Connection{
-		url:           url,
-		workerKey:     workerKey,
-		identity:      id,
-		model:         model,
-		quantisation:  quantisation,
-		dialer:        dialer,
-		WorkUnitCh:    make(chan *protocol.WorkUnit, 10),
-		ModelUpdateCh: make(chan *protocol.ModelUpdate, 5),
-		done:          make(chan struct{}),
-		connectedCh:   make(chan struct{}),
+		url:            url,
+		workerKey:      workerKey,
+		identity:       id,
+		model:          model,
+		quantisation:   quantisation,
+		dialer:         dialer,
+		WorkUnitCh:     make(chan *protocol.WorkUnit, 10),
+		ModelUpdateCh:  make(chan *protocol.ModelUpdate, 5),
+		BinaryUpdateCh: make(chan *protocol.BinaryUpdate, 1),
+		done:           make(chan struct{}),
+		connectedCh:    make(chan struct{}),
 	}
 }
 
@@ -118,6 +121,8 @@ func (c *Connection) connect(ctx context.Context) error {
 		"X-Worker-Model":        []string{c.model},
 		"X-Worker-Quantisation": []string{c.quantisation},
 		"X-Worker-Version":      []string{version.Version},
+		"X-Worker-OS":           []string{runtime.GOOS},
+		"X-Worker-Arch":         []string{runtime.GOARCH},
 	}
 
 	c.mu.Lock()
@@ -196,6 +201,18 @@ func (c *Connection) readLoop(ctx context.Context) error {
 				Str("llm_hash", mu.LLMHash).
 				Msg("received model update from manager")
 			c.ModelUpdateCh <- &mu
+
+		case protocol.TypeBinaryUpdate:
+			var bu protocol.BinaryUpdate
+			if err := json.Unmarshal(message, &bu); err != nil {
+				log.Warn().Err(err).Msg("invalid binary_update message")
+				continue
+			}
+			log.Info().
+				Str("version", bu.Version).
+				Str("download_url", bu.DownloadURL).
+				Msg("received binary update from manager")
+			c.BinaryUpdateCh <- &bu
 
 		case protocol.TypeHeartbeat:
 			// Manager acknowledged our heartbeat, nothing to do

@@ -58,6 +58,16 @@
 </table>
 {{else}}<p class="empty">No errors recorded.</p>{{end}}
 
+<h2>Binary Version Config</h2>
+{{if .VersionTarget}}
+<div class="grid">
+  <div class="card"><div class="label">Target</div><div class="value">{{.VersionTarget}}</div></div>
+  <div class="card"><div class="label">Rollout</div><div class="value">{{.VersionRolloutMode}} ({{.VersionPercentage}}%)</div></div>
+  <div class="card"><div class="label">Synced</div><div class="value green">{{.WorkersSynced}}</div></div>
+  <div class="card"><div class="label">Outdated</div><div class="value yellow">{{.WorkersOutdated}}</div></div>
+</div>
+{{else}}<p class="empty">No target version configured. Use <code>POST /v1/admin/version</code> to set one.</p>{{end}}
+
 <div class="footer">Generated at {{.GeneratedAt}}</div>
 </body>
 </html>
