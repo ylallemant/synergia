@@ -36,6 +36,10 @@ Minimal implementation: connects to a single cluster manager, shells out to a lo
 - **Binary auto-update**: receives `binary_update` push from manager, downloads new binary (GitHub releases with manager proxy fallback), verifies SHA256, self-replaces with atomic rename (Unix) or helper shim (Windows), restarts. Previous binary kept as `.bak` for rollback if reconnect fails within 60s
 - **Backend auto-update**: receives `backend_update` push from manager, downloads the full release archive (tar.gz/zip) from upstream or manager fallback, extracts all files (binaries, shared libraries, symlinks) into the backend directory, restarts `llama-server` with the new binary
 - **Windows update helper**: separate `synergia-updater.exe` handles locked-file replacement on Windows. Downloaded from the same release on first need; version kept in sync with client
+- **Pre-configured manager URL**: binary contains a sentinel placeholder (`$$SYNERGIA_MANAGER_URL$$`) that can be patched at distribution time (by the manager's download endpoint) or overridden via `--manager-url` flag / env var
+- **Unconfigured first-run**: if no manager URL is configured, the client starts in setup mode — shows a "Manager URL" field on the dashboard, does not attempt WebSocket connection until configured
+- **Nickname**: optional display name stored locally and synced to the manager for the community leaderboard (board of fame)
+- **Auto-open browser**: on first start (unconfigured) or when consent has not been given, automatically opens the local dashboard in the user's default browser (`open` on macOS, `xdg-open` on Linux, `start` on Windows)
 
 ### Out of Scope (Phase 2+)
 
@@ -106,7 +110,7 @@ cmd/synergia-client/ + internal/client/
 
 | Flag / Env | Default | Description |
 |---|---|---|
-| `--manager-url` / `CLUSTER_MANAGER_URL` | `wss://localhost:7500/ws/worker` | WebSocket URL of the cluster manager |
+| `--manager-url` / `CLUSTER_MANAGER_URL` | (from binary sentinel or empty) | WebSocket URL of the cluster manager. If empty, the client starts in unconfigured mode and prompts via the dashboard |
 | `--worker-key` / `CLUSTER_WORKER_KEY` | (required) | Shared secret for WebSocket auth |
 | `--llm-url` / `WORKER_LLM_URL` | `http://localhost:8080` | Local `llama-server` endpoint |
 | `--model` / `WORKER_MODEL` | (required) | Model name to report (e.g., `mistral-small-3.2-24b-instruct-2506`) |
@@ -126,6 +130,38 @@ When running in insecure mode (`--insecure`), the client logs:
 ```
 WARN  TLS disabled — running in insecure mode (traffic is unencrypted)
 ```
+
+## First-Run UX
+
+### Unconfigured State
+
+If no manager URL is available (sentinel placeholder unpatched, no `--manager-url` flag, no env var):
+
+1. Client starts in **setup mode** — system tray icon shows ⚫ (disconnected)
+2. Local dashboard at `http://127.0.0.1:9876` shows a configuration form:
+   - **Manager URL** field (required) — e.g. `wss://cluster.example.com:7500/ws/worker`
+   - **Nickname** field (optional) — display name for the community leaderboard
+   - **Connect** button — saves config and initiates the WebSocket connection
+3. Browser auto-opens to the dashboard
+4. WebSocket connection is **not** attempted until the URL is submitted
+
+### Consent Pending
+
+If the manager URL is configured but consent has never been given:
+
+1. Client connects to the manager (registers identity)
+2. Browser auto-opens to the dashboard showing the consent form
+3. Work units are **not** dispatched until consent is accepted
+
+### Nickname
+
+Workers can optionally set a **nickname** in their configuration:
+- Stored locally in `<data-dir>/config.json`
+- Synced to the manager via `POST /v1/worker-config`
+- Displayed on the community leaderboard (`/community` page on the manager)
+- Workers without a nickname appear as "Anonymous Worker" or a truncated fingerprint
+
+The nickname can be changed at any time from the local dashboard.
 
 ## GPU Platform Support
 

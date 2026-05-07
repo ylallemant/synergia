@@ -48,6 +48,9 @@ type Server struct {
 	autostart *autostart.Manager
 	hwInfo    hwinfo.Info
 	server    *http.Server
+
+	// onManagerURLSet is called when the user configures a manager URL in setup mode.
+	onManagerURLSet func(url string)
 }
 
 func New(addr string, status StatusProvider, consentMgr *consent.Manager, configMgr *workerconfig.Manager, brandingMgr *branding.Manager, autostartMgr *autostart.Manager) *Server {
@@ -62,6 +65,11 @@ func New(addr string, status StatusProvider, consentMgr *consent.Manager, config
 	}
 }
 
+// SetManagerURLCallback sets the function called when the user submits a manager URL.
+func (s *Server) SetManagerURLCallback(fn func(url string)) {
+	s.onManagerURLSet = fn
+}
+
 // Run starts the HTTP server. Blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) {
 	mux := http.NewServeMux()
@@ -74,6 +82,7 @@ func (s *Server) Run(ctx context.Context) {
 	mux.HandleFunc("/api/roles", s.handleRoles)
 	mux.HandleFunc("/api/autostart", s.handleAutostart)
 	mux.HandleFunc("/api/hardware-info", s.handleHardwareInfo)
+	mux.HandleFunc("/api/manager-url", s.handleManagerURL)
 
 	// Dynamic branding CSS (served from manager cache)
 	mux.HandleFunc("/static/branding.css", s.handleBrandingCSS)
@@ -137,6 +146,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		},
 		"config": map[string]any{
 			"preferred_role": cfg.PreferredRole,
+			"nickname":       cfg.Nickname,
 		},
 		"hardware": map[string]any{
 			"os":                 s.hwInfo.OS,
@@ -282,6 +292,7 @@ func (s *Server) handleHardwareInfo(w http.ResponseWriter, r *http.Request) {
 		},
 		"config": map[string]any{
 			"preferred_role": cfg.PreferredRole,
+			"nickname":       cfg.Nickname,
 		},
 	}
 
@@ -385,4 +396,46 @@ func (s *Server) handleAutostart(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleManagerURL(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == http.MethodOptions {
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.URL == "" {
+		http.Error(w, `{"error":"url is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	if s.onManagerURLSet != nil {
+		s.onManagerURLSet(req.URL)
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }

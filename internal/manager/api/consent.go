@@ -57,12 +57,14 @@ type ConsentResponse struct {
 type ConfigRequest struct {
 	Fingerprint   string `json:"fingerprint"`
 	PreferredRole string `json:"preferred_role"`
+	Nickname      string `json:"nickname"`
 }
 
 // ConfigResponse is returned on config queries.
 type ConfigResponse struct {
 	Fingerprint   string `json:"fingerprint"`
 	PreferredRole string `json:"preferred_role"`
+	Nickname      string `json:"nickname"`
 }
 
 // ConsentHandler handles GET and POST on /v1/consent.
@@ -210,6 +212,7 @@ func (c *ConsentAPI) getConfig(w http.ResponseWriter, r *http.Request) {
 	resp := ConfigResponse{Fingerprint: fingerprint}
 	if config != nil {
 		resp.PreferredRole = config.PreferredRole
+		resp.Nickname = config.Nickname
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -241,7 +244,7 @@ func (c *ConsentAPI) setConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := c.store.SetWorkerConfig(req.Fingerprint, req.PreferredRole); err != nil {
+	if err := c.store.SetWorkerConfig(req.Fingerprint, req.PreferredRole, req.Nickname); err != nil {
 		log.Error().Err(err).Str("fingerprint", req.Fingerprint).Msg("failed to set worker config")
 		writeError(w, http.StatusInternalServerError, "database error")
 		return

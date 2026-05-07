@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synergia Community</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:2rem}
+h1{text-align:center;font-size:2rem;margin-bottom:.5rem}
+.header{display:flex;align-items:center;justify-content:center;gap:1.5rem;margin-bottom:.5rem}
+.header h1{margin:0}
+.header .cta-btn{font-size:.9rem;padding:.5rem 1.2rem}
+.subtitle{text-align:center;color:#94a3b8;margin-bottom:2rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;max-width:900px;margin:0 auto 2rem}
+.card{background:#1e293b;border-radius:10px;padding:1.2rem;text-align:center}
+.card .label{color:#94a3b8;font-size:.8rem;text-transform:uppercase;letter-spacing:.5px}
+.card .value{font-size:1.8rem;font-weight:700;margin-top:.3rem}
+.green{color:#4ade80}.blue{color:#60a5fa}.yellow{color:#fbbf24}.purple{color:#a78bfa}
+h2{max-width:900px;margin:2rem auto .75rem;font-size:1.2rem}
+table{max-width:900px;margin:0 auto;width:100%;border-collapse:collapse;background:#1e293b;border-radius:8px;overflow:hidden}
+th,td{padding:.6rem 1rem;text-align:left;border-bottom:1px solid #334155}
+th{background:#0f172a;color:#94a3b8;font-size:.8rem;text-transform:uppercase}
+.gpu-list{max-width:900px;margin:0 auto}
+.gpu-item{display:flex;justify-content:space-between;padding:.4rem 0;border-bottom:1px solid #1e293b}
+.loading{text-align:center;color:#64748b;padding:2rem}
+.cta-btn{display:inline-block;background:#4ade80;color:#0f172a;padding:.75rem 2rem;border-radius:8px;text-decoration:none;font-size:1.1rem;font-weight:600;transition:background .2s}
+.cta-btn:hover{background:#22c55e}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Synergia Community</h1>
+  <a href="/download" class="cta-btn" title="Join the network and share your GPU power with the community !!!">Contribute!</a>
+</div>
+<p class="subtitle">Distributed compute network — live stats</p>
+
+<div class="grid">
+  <div class="card"><div class="label">Workers Online</div><div class="value green" id="workers-online">-</div></div>
+  <div class="card"><div class="label">Total Workers</div><div class="value blue" id="workers-total">-</div></div>
+  <div class="card"><div class="label">Work Units (all time)</div><div class="value purple" id="work-units-total">-</div></div>
+  <div class="card"><div class="label">Work Units (today)</div><div class="value yellow" id="work-units-today">-</div></div>
+  <div class="card"><div class="label">Avg Latency</div><div class="value" id="avg-latency">-</div></div>
+</div>
+
+<h2>Hardware</h2>
+<div class="gpu-list" id="gpu-breakdown"><p class="loading">Loading...</p></div>
+
+<h2>Leaderboard</h2>
+<table>
+<thead><tr><th>#</th><th>Contributor</th><th>Work Units</th><th>Compute Time</th></tr></thead>
+<tbody id="leaderboard"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody>
+</table>
+
+
+
+<script>
+function formatDuration(ms) {
+  if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+  if (ms < 3600000) return (ms / 60000).toFixed(1) + 'min';
+  return (ms / 3600000).toFixed(1) + 'h';
+}
+
+function refresh() {
+  fetch('/v1/community/stats')
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('workers-online').textContent = data.workers_online;
+      document.getElementById('workers-total').textContent = data.workers_total;
+      document.getElementById('work-units-total').textContent = data.work_units_total.toLocaleString();
+      document.getElementById('work-units-today').textContent = data.work_units_today.toLocaleString();
+      document.getElementById('avg-latency').textContent = data.avg_latency_ms ? data.avg_latency_ms + 'ms' : '-';
+
+      // GPU breakdown
+      const gpuDiv = document.getElementById('gpu-breakdown');
+      const gpus = Object.entries(data.gpu_breakdown || {}).sort((a, b) => b[1] - a[1]);
+      if (gpus.length === 0) {
+        gpuDiv.innerHTML = '<p class="loading">No hardware data yet.</p>';
+      } else {
+        gpuDiv.innerHTML = gpus.map(([name, count]) =>
+          '<div class="gpu-item"><span>' + name + '</span><span>' + count + '</span></div>'
+        ).join('');
+      }
+
+      // Leaderboard
+      const tbody = document.getElementById('leaderboard');
+      const entries = data.leaderboard || [];
+      if (entries.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="loading">No contributions yet.</td></tr>';
+      } else {
+        tbody.innerHTML = entries.map((e, i) =>
+          '<tr><td>' + (i + 1) + '</td><td>' + e.nickname + '</td><td>' + e.work_units.toLocaleString() + '</td><td>' + formatDuration(e.total_time_ms) + '</td></tr>'
+        ).join('');
+      }
+    })
+    .catch(() => {});
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

@@ -21,6 +21,7 @@ import (
 	"github.com/ylallemant/synergia/internal/client/autostart"
 	"github.com/ylallemant/synergia/internal/client/backend"
 	"github.com/ylallemant/synergia/internal/client/branding"
+	"github.com/ylallemant/synergia/internal/client/browser"
 	"github.com/ylallemant/synergia/internal/client/config"
 	"github.com/ylallemant/synergia/internal/client/connection"
 	"github.com/ylallemant/synergia/internal/client/consent"
@@ -79,6 +80,12 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal().Err(err).Msg("configuration error")
+	}
+
+	// Unconfigured mode: no manager URL — start dashboard and wait for user input
+	if cfg.Unconfigured {
+		runUnconfigured(cfg)
+		return
 	}
 
 	// Configure global HTTP transport with custom CA if provided
@@ -193,6 +200,17 @@ func main() {
 	go syncWithManager(ctx, conn, consentMgr, configMgr, brandingMgr, reporter)
 	defer brandingMgr.Stop()
 
+	// Auto-open browser if consent hasn't been given yet
+	if !consentMgr.IsAccepted() && !cfg.AutoApprove {
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			dashURL := "http://" + dashboardAddr + "/static/index.html"
+			if err := browser.Open(dashURL); err != nil {
+				log.Warn().Err(err).Msg("failed to open browser")
+			}
+		}()
+	}
+
 	// Calibrate GPU baseline (sample 5 times, 1s apart, +5% headroom)
 	monitor.CalibrateBaseline(5, time.Second, 5)
 
@@ -256,6 +274,58 @@ func main() {
 	t.Run()
 
 	log.Info().Msg("cluster client stopped")
+}
+
+// runUnconfigured handles the first-run state when no manager URL is configured.
+// It starts only the local dashboard, opens the browser, and waits for the user
+// to submit a manager URL via the dashboard form. Once configured, it exits so
+// the process can restart with the new configuration (via autostart or manually).
+func runUnconfigured(cfg *config.Config) {
+	log.Warn().Msg("no manager URL configured — starting in setup mode")
+	log.Info().Str("dashboard", "http://"+dashboardAddr+"/static/index.html").Msg("open the dashboard to configure the manager URL")
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Create minimal components for the dashboard
+	id, err := identity.LoadOrCreate(cfg.DataDir)
+	if err != nil {
+		log.Fatal().Err(err).Msg("identity error")
+	}
+
+	// Minimal status provider, consent, config, branding, autostart
+	sp := status.New(nil, nil, nil, id, "", "")
+	consentMgr := consent.New(cfg.DataDir, "", "", id.Fingerprint, false)
+	configMgr := workerconfig.New(cfg.DataDir, "", "", id.Fingerprint)
+	brandingMgr := branding.New(cfg.DataDir, "", "")
+	autostartMgr := autostart.New(execPath(), os.Args[1:])
+
+	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr)
+
+	// When user submits a URL, save it to a config file and exit for restart
+	srv.SetManagerURLCallback(func(managerURL string) {
+		log.Info().Str("url", managerURL).Msg("manager URL configured — restart required")
+		// Save to a local setup file that can be read on next start
+		setupFile := cfg.DataDir + "/manager-url"
+		_ = os.MkdirAll(cfg.DataDir, 0700)
+		_ = os.WriteFile(setupFile, []byte(managerURL), 0600)
+		// Exit — autostart or the user will restart the process
+		stop()
+	})
+
+	go srv.Run(ctx)
+
+	// Auto-open browser
+	go func() {
+		time.Sleep(500 * time.Millisecond) // give server time to bind
+		dashURL := "http://" + dashboardAddr + "/static/index.html"
+		if err := browser.Open(dashURL); err != nil {
+			log.Warn().Err(err).Msg("failed to open browser")
+		}
+	}()
+
+	<-ctx.Done()
+	log.Info().Msg("setup mode exiting")
 }
 
 // wsToHTTP converts a WebSocket URL to its HTTP equivalent for REST API calls.

@@ -201,6 +201,16 @@ func main() {
 	// Client error reporting API (authenticated with worker key)
 	mux.HandleFunc("/v1/errors", errorsAPI.ErrorsHandler)
 
+	// Public pages (no auth required)
+	downloadAPI := api.NewDownloadAPI(cfg.ClientBinaryDir, cfg.CacheDir, adminCache)
+	communityAPI := api.NewCommunityAPI(db)
+	mux.HandleFunc("/download/", downloadAPI.BinaryHandler)
+	mux.HandleFunc("/download", downloadAPI.DownloadPageHandler)
+	mux.HandleFunc("/install", downloadAPI.InstallHandler)
+	mux.HandleFunc("/community", communityAPI.PageHandler)
+	mux.HandleFunc("/v1/community/stats", communityAPI.StatsHandler)
+	mux.HandleFunc("/", communityAPI.PageHandler)
+
 	// Worker WebSocket gateway
 	mux.Handle("/ws/worker", gw)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {

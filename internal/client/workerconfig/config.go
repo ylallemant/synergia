@@ -16,6 +16,7 @@ import (
 // Config holds worker configuration preferences that are synced with the manager.
 type Config struct {
 	PreferredRole string `json:"preferred_role"`
+	Nickname      string `json:"nickname"`
 }
 
 // Manager handles configuration persistence and sync with the cluster manager.
@@ -66,6 +67,7 @@ func (m *Manager) SyncWithManager() error {
 	payload := map[string]any{
 		"fingerprint":    m.fingerprint,
 		"preferred_role": cfg.PreferredRole,
+		"nickname":       cfg.Nickname,
 	}
 
 	body, _ := json.Marshal(payload)

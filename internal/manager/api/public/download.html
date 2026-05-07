@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download Synergia Client</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:2rem}
+h1{font-size:2rem;margin-bottom:.5rem}
+.subtitle{color:#94a3b8;margin-bottom:2rem}
+.card{background:#1e293b;border-radius:12px;padding:2rem;max-width:500px;width:100%;text-align:center}
+.detected{color:#94a3b8;font-size:.9rem;margin-bottom:1.5rem}
+.btn{display:inline-block;background:#3b82f6;color:#fff;padding:.75rem 2rem;border-radius:8px;text-decoration:none;font-size:1.1rem;font-weight:500;transition:background .2s}
+.btn:hover{background:#2563eb}
+.btn.disabled{background:#475569;cursor:not-allowed;pointer-events:none}
+.all-platforms{margin-top:2rem}
+.toggle{background:none;border:none;color:#60a5fa;cursor:pointer;font-size:.9rem;text-decoration:underline}
+.platforms{display:none;margin-top:1rem;text-align:left}
+.platforms.show{display:block}
+.platforms a{display:block;color:#93c5fd;padding:.4rem 0;text-decoration:none}
+.platforms a:hover{color:#bfdbfe}
+.install-cmd{margin-top:2rem;background:#0f172a;border-radius:8px;padding:1rem;font-family:monospace;font-size:.85rem;color:#a5b4fc;position:relative;text-align:left;word-break:break-all}
+.copy-btn{position:absolute;top:.5rem;right:.5rem;background:#334155;border:none;color:#e2e8f0;padding:.3rem .6rem;border-radius:4px;cursor:pointer;font-size:.75rem}
+.copy-btn:hover{background:#475569}
+.unsupported{color:#f87171;background:#1e293b;border:1px solid #7f1d1d;border-radius:8px;padding:1rem;margin-top:1rem;font-size:.9rem}
+</style>
+</head>
+<body>
+<h1>Synergia Client</h1>
+<p class="subtitle">Join the network and share your GPU power with the community !</p>
+
+<div class="card">
+  <p class="detected" id="detected">Detecting your platform...</p>
+
+  <a id="download-btn" class="btn disabled" href="#">Download</a>
+
+  <div class="all-platforms">
+    <button class="toggle" onclick="document.getElementById('platforms').classList.toggle('show')">Show all platforms</button>
+    <div id="platforms" class="platforms">
+      <a href="/download/darwin/arm64">macOS — Apple Silicon (arm64)</a>
+      <a href="/download/linux/amd64">Linux — x86_64 (amd64)</a>
+      <a href="/download/linux/arm64">Linux — ARM64</a>
+      <a href="/download/windows/amd64">Windows — x86_64 (amd64)</a>
+      <a href="/download/windows/arm64">Windows — ARM64</a>
+    </div>
+  </div>
+
+  <div class="install-cmd">
+    <button class="copy-btn" onclick="copyCmd()">Copy</button>
+    <span id="install-cmd">curl -sSL <span id="install-url"></span>/install | sh</span>
+  </div>
+</div>
+
+<script>
+(function() {
+  const btn = document.getElementById('download-btn');
+  const detected = document.getElementById('detected');
+  const installURL = document.getElementById('install-url');
+
+  installURL.textContent = location.origin;
+
+  let os = '', arch = '';
+
+  // Try modern API first
+  if (navigator.userAgentData && navigator.userAgentData.platform) {
+    const p = navigator.userAgentData.platform.toLowerCase();
+    if (p.includes('mac')) os = 'darwin';
+    else if (p.includes('win')) os = 'windows';
+    else if (p.includes('linux')) os = 'linux';
+  }
+
+  // Fallback to User-Agent
+  if (!os) {
+    const ua = navigator.userAgent.toLowerCase();
+    if (ua.includes('mac')) os = 'darwin';
+    else if (ua.includes('win')) os = 'windows';
+    else if (ua.includes('linux')) os = 'linux';
+  }
+
+  // Arch detection
+  if (navigator.userAgentData && navigator.userAgentData.architecture) {
+    const a = navigator.userAgentData.architecture.toLowerCase();
+    if (a.includes('arm') || a.includes('aarch64')) arch = 'arm64';
+    else arch = 'amd64';
+  } else {
+    // macOS only has arm64 build; other platforms default to amd64
+    if (os === 'darwin') {
+      arch = 'arm64';
+    } else {
+      arch = 'amd64';
+    }
+  }
+
+  if (os && arch) {
+    const supported = {
+      'darwin/arm64': 'macOS Apple Silicon',
+      'linux/amd64': 'Linux x86_64',
+      'linux/arm64': 'Linux ARM64',
+      'windows/amd64': 'Windows x86_64',
+      'windows/arm64': 'Windows ARM64'
+    };
+    const key = os + '/' + arch;
+    const label = supported[key];
+    if (label) {
+      detected.textContent = 'Detected: ' + label;
+      btn.textContent = 'Download for ' + label;
+      btn.href = '/download/' + os + '/' + arch;
+      btn.classList.remove('disabled');
+    } else {
+      detected.textContent = 'Detected: ' + os + ' ' + arch;
+      btn.style.display = 'none';
+      const notice = document.createElement('p');
+      notice.className = 'unsupported';
+      notice.textContent = 'Your platform (' + os + '/' + arch + ') is not supported. Please choose from the available platforms below.';
+      btn.parentNode.insertBefore(notice, btn.nextSibling);
+    }
+  } else {
+    detected.textContent = 'Could not detect platform — choose from the list below';
+    btn.style.display = 'none';
+  }
+})();
+
+function copyCmd() {
+  const text = document.getElementById('install-cmd').textContent;
+  navigator.clipboard.writeText(text.replace('Copy', '').trim());
+}
+</script>
+</body>
+</html>

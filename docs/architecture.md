@@ -221,6 +221,7 @@ Single worker, no trust system, no redundancy. Validates the end-to-end path. **
 - Public registration + contributor agreement
 - Document classification (public vs private routing)
 - Horizontal scaling of cluster manager
+- Community stats page + leaderboard (board of fame)
 
 ### Phase 4: Advanced
 
@@ -304,6 +305,80 @@ The admin dashboard includes a Backend section with:
 - A **version dropdown** populated from GitHub tags via `/v1/admin/backend/tags`
 - A **refresh button** (↻) to re-fetch tags
 - An **Apply** button to set the target version
+
+## Client Distribution
+
+The cluster manager serves as the distribution point for worker binaries. Since the download happens from the manager itself, it knows its own hostname and can pre-configure the binary at download time.
+
+### Binary Patching
+
+The client binary is compiled with a fixed-size sentinel placeholder:
+
+```go
+var defaultManagerURL = "$$SYNERGIA_MANAGER_URL$$" + strings.Repeat("\x00", 224)
+// total: 256 bytes, null-padded
+```
+
+When the manager serves `GET /download/:os/:arch`, it reads the pre-built binary, finds the sentinel, replaces it with `wss://<self-hostname>:<port>/ws/worker` (null-padded to same length), and streams the result. No per-deployment CI builds — one generic binary works for every cluster.
+
+### Download Page (`/download`)
+
+The manager serves a public download page that:
+1. Detects the visitor's OS and architecture via `navigator.userAgentData` (with User-Agent fallback)
+2. Shows a primary download button for the detected platform
+3. Provides a "Show all platforms" expander for other OS/arch combinations
+4. Optionally includes a "Copy install command" for CLI users
+
+### Install Script
+
+For CLI users, the manager also serves a platform-aware install script:
+
+```bash
+curl -sSL https://cluster.example.com:7500/install | sh
+```
+
+The script (generated per-request with the manager's own URL) downloads the correct binary, writes a config file, and sets up auto-start (macOS LaunchAgent / Linux systemd user service / Windows Registry).
+
+### First-Run UX (Unconfigured Client)
+
+If the binary was not patched (e.g. downloaded from GitHub releases directly), the client starts in **unconfigured state**:
+
+1. WebSocket connection is **not** attempted
+2. The local dashboard shows a "Manager URL" field prominently above the consent block
+3. A "Nickname" field allows the user to set a display name (for the community leaderboard)
+4. The client auto-opens the dashboard in the user's default browser
+5. Once the user enters the manager URL, the client connects and shows the consent form
+6. On subsequent starts: if consent was never given, auto-open browser again
+
+### Worker Nickname
+
+Each worker can set an optional **nickname** (stored locally, synced to the manager via worker config). The nickname is displayed on the community leaderboard. Workers without a nickname appear as "Anonymous Worker" or a truncated fingerprint.
+
+## Community Pages
+
+The cluster manager serves two public pages on the API/WS port (no authentication required):
+
+### Download Page (`/download`)
+
+See [Client Distribution](#download-page-download) above.
+
+### Community Stats Page (`/community`)
+
+A live public dashboard showing cluster health and contributor rankings:
+
+| Section | Content |
+|---|---|
+| **Cluster Overview** | Workers online, total registered, cluster uptime |
+| **Compute Power** | Total TFLOPS (FP16), aggregate VRAM, estimated tokens/sec |
+| **Workload** | Requests today, avg latency (p50), batch queue depth |
+| **Live Activity** | Requests/min sparkline (last hour), workers processing vs idle |
+| **Contributions** | Total work units completed (all time), total tokens generated |
+| **Hardware** | GPU breakdown (Apple Silicon / NVIDIA / AMD / Intel) |
+| **Leaderboard** | Top contributors ranked by work units, with nickname and compute time |
+
+The page uses JS polling (2s interval) against a public stats endpoint (`GET /v1/community/stats`) that exposes only **aggregate data** — no fingerprints, no IPs, no individual worker details (except nickname + rank in the leaderboard).
+
+**Compute power estimation**: each worker reports GPU model via hardware info → manager maintains a lookup table of theoretical TFLOPS per GPU. Sum of connected workers = cluster compute power.
 
 ## Open Questions
 

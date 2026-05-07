@@ -43,6 +43,9 @@ type Config struct {
 	// Latency monitoring
 	LatencyBuckets     int // Number of payload-size buckets for the latency matrix
 	LatencyWindowHours int // Rolling window in hours for sample retention
+
+	// Client distribution
+	ClientBinaryDir string // Directory containing pre-built generic client binaries
 }
 
 func Load() (*Config, error) {
@@ -69,6 +72,7 @@ func Load() (*Config, error) {
 		CacheDir:           envOrDefault("CLUSTER_CACHE_DIR", "./cache"),
 		LatencyBuckets:     envOrDefaultInt("CLUSTER_LATENCY_BUCKETS", 4),
 		LatencyWindowHours: envOrDefaultInt("CLUSTER_LATENCY_WINDOW_HOURS", 48),
+		ClientBinaryDir:    envOrDefault("CLUSTER_CLIENT_BINARY_DIR", "./binaries"),
 	}
 
 	if cfg.APIKey == "" {

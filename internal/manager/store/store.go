@@ -274,8 +274,8 @@ func (s *Store) GetWorkerConfig(fingerprint string) (*WorkerConfig, error) {
 	return &config, nil
 }
 
-// SetWorkerConfig creates or updates a worker's configuration (preferred role only).
-func (s *Store) SetWorkerConfig(fingerprint, preferredRole string) error {
+// SetWorkerConfig creates or updates a worker's configuration.
+func (s *Store) SetWorkerConfig(fingerprint, preferredRole, nickname string) error {
 	var config WorkerConfig
 	result := s.DB.Where("fingerprint = ?", fingerprint).First(&config)
 
@@ -283,6 +283,7 @@ func (s *Store) SetWorkerConfig(fingerprint, preferredRole string) error {
 		config = WorkerConfig{
 			Fingerprint:   fingerprint,
 			PreferredRole: preferredRole,
+			Nickname:      nickname,
 		}
 		return s.DB.Create(&config).Error
 	}
@@ -292,6 +293,7 @@ func (s *Store) SetWorkerConfig(fingerprint, preferredRole string) error {
 
 	return s.DB.Model(&config).Updates(map[string]any{
 		"preferred_role": preferredRole,
+		"nickname":       nickname,
 	}).Error
 }
 

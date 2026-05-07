@@ -42,6 +42,12 @@ Minimal implementation: single worker, no trust system, no redundancy. The goal 
 - **Backend registry** (`internal/manager/backend/`): central package defining supported backend names (constants), download URL templates with platform/arch placeholders, and GitHub tag retrieval
 - **Admin configuration UI** (`/admin/config` on admin port): unified page showing target client version, backend name/version (with dropdown and refresh), role-model matrix, and worker overview (fingerprint, OS/arch, version, sync status)
 - **Platform-aware worker registry**: stores `os` and `arch` (from `X-Worker-OS`/`X-Worker-Arch` headers) in the workers table for binary artifact resolution
+- **Worker nickname**: stores optional display name from worker config sync, used on community leaderboard
+- **Download page** (`GET /download` on API port): public HTML page with OS/arch auto-detection, serves pre-built client binaries with the manager URL patched in at download time (sentinel replacement)
+- **Binary patching** (`GET /download/:os/:arch`): reads the generic client binary, replaces the `$$SYNERGIA_MANAGER_URL$$` sentinel with the manager's own WSS URL, streams the patched binary to the user
+- **Install script** (`GET /install`): platform-aware shell script generated per-request with the manager's URL, downloads the correct binary and configures auto-start
+- **Community stats page** (`GET /community` on API port): live public dashboard showing cluster health, compute power, workload, and contributor leaderboard (no auth required, aggregate data only)
+- **Community stats API** (`GET /v1/community/stats`): public endpoint returning aggregate cluster metrics (workers online, TFLOPS, work units, leaderboard)
 
 ### Out of Scope (Phase 2+)
 
@@ -68,8 +74,10 @@ cmd/synergia-manager/ + internal/manager/
     │   ├── backend.go               # Backend version management + download proxy + tags API
     │   ├── batch.go                 # OpenAI-compatible /v1/batches (create, retrieve, list, cancel)
     │   ├── branding.go              # Branding CSS API (served to worker dashboards)
+    │   ├── community.go             # Community stats API (public, no auth)
     │   ├── completions.go           # OpenAI-compatible /v1/chat/completions handler
     │   ├── consent.go               # Consent + worker config API
+    │   ├── download.go              # Client binary download with sentinel patching + install script
     │   ├── synergia.go             # Synergia API (models, workers, work-units, stats)
     │   ├── errors.go                # Client error reporting API (POST + GET /v1/errors)
     │   ├── latency.go               # Latency monitoring admin API (GET /v1/latency, config)
@@ -91,6 +99,8 @@ cmd/synergia-manager/ + internal/manager/
     ├── server/
     │   ├── server.go                # Admin dashboard HTTP server (admin port)
     │   └── static/                  # Embedded HTML template + CSS for admin dashboard
+    ├── public/
+    │   └── static/                  # Embedded HTML for public pages (download, community)
     ├── store/
     │   ├── models.go                # GORM models (Worker, WorkUnit, WorkerConfig, RoleModel)
     │   └── store.go                 # Database init, migrations, CRUD operations
@@ -135,6 +145,57 @@ The admin port serves:
 - **Latency API** (`/v1/latency`, `/v1/latency/config`) — latency matrix queries and configuration
 
 The admin port inherits the same TLS settings as the main port. Authentication uses `CLUSTER_API_KEY` or `CLUSTER_WORKER_KEY` (query param `?key=` also supported for browser access).
+
+### Public Pages (on API port)
+
+The main API port also serves public pages accessible **without authentication**:
+
+#### Download Page (`GET /download`)
+
+A public page for distributing pre-configured client binaries:
+- Detects visitor's OS and architecture via `navigator.userAgentData` (with User-Agent fallback)
+- Shows a primary download button for the detected platform (e.g. "Download for macOS Apple Silicon")
+- "Show all platforms" expander for other OS/arch combinations
+- "Copy install command" button for CLI users
+
+#### Binary Download (`GET /download/:os/:arch`)
+
+Serves the client binary with the manager URL patched in:
+1. Reads the pre-built generic binary from the configured artifact directory
+2. Finds the `$$SYNERGIA_MANAGER_URL$$` sentinel (256 bytes, null-padded)
+3. Replaces it with `wss://<request-host>/ws/worker` (null-padded to same length)
+4. Streams the patched binary as a download
+
+Valid OS values: `darwin`, `linux`, `windows`. Valid arch values: `amd64`, `arm64`.
+
+#### Install Script (`GET /install`)
+
+A platform-aware shell script generated per-request:
+- Detects OS and arch from the request headers or query params
+- Downloads the correct patched binary from the same manager
+- Writes a config file with the manager URL and worker key (if provided via `?key=` query param)
+- Sets up auto-start (macOS LaunchAgent / Linux systemd user service)
+
+```bash
+curl -sSL https://cluster.example.com:7500/install | sh
+curl -sSL https://cluster.example.com:7500/install?key=<worker-key> | sh
+```
+
+#### Community Stats Page (`GET /community`)
+
+A live public dashboard showing cluster health and contributor rankings:
+
+| Section | Content |
+|---|---|
+| **Cluster Overview** | Workers online, total registered, cluster uptime |
+| **Compute Power** | Total TFLOPS (FP16), aggregate VRAM, estimated tokens/sec |
+| **Workload** | Requests today, avg latency (p50), batch queue depth |
+| **Live Activity** | Requests/min sparkline, workers processing vs idle |
+| **Contributions** | Total work units (all time), total tokens generated |
+| **Hardware** | GPU breakdown (Apple Silicon / NVIDIA / AMD / Intel) |
+| **Leaderboard** | Top contributors by work units (nickname + compute time) |
+
+Data sourced from `GET /v1/community/stats` (public, no auth). Uses JS polling (2s interval). Only aggregate data is exposed — no fingerprints, no IPs.
 
 ### TLS (default)
 

@@ -77,6 +77,7 @@ type WorkerConfig struct {
 	gorm.Model
 	Fingerprint   string `gorm:"uniqueIndex;size:64"`
 	PreferredRole string `gorm:"size:40"` // e.g., "inference", "embedding", "any"
+	Nickname      string `gorm:"size:64"` // optional display name for community leaderboard
 }
 
 // HardwareInfo is used to pass hardware stats when setting consent.

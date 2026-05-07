@@ -37,19 +37,49 @@ func New(conn *connection.Connection, monitor *gpu.Monitor, llmClient *llm.Clien
 	}
 }
 
-func (p *Provider) IsConnected() bool               { return p.conn.IsConnected() }
-func (p *Provider) GPUState() gpu.State             { return p.monitor.GetState() }
-func (p *Provider) GPUUtilization() int             { return p.monitor.GetUtilization() }
-func (p *Provider) GPUSupported() (bool, string)    { return p.monitor.GPUSupported() }
-func (p *Provider) GPUDriverInfo() (string, string) { return p.monitor.GPUDriverInfo() }
-func (p *Provider) LLMReachable() (bool, string)    { return p.llmClient.IsReachable() }
-func (p *Provider) Fingerprint() string             { return p.id.Fingerprint }
-func (p *Provider) Model() string                   { return p.model }
-func (p *Provider) Quantisation() string            { return p.quantisation }
-func (p *Provider) UnitsProcessed() int64           { return p.units.Load() }
-func (p *Provider) Uptime() time.Duration           { return time.Since(p.startedAt) }
-func (p *Provider) IncrementUnits()                 { p.units.Add(1) }
-func (p *Provider) IsProcessing() bool              { return p.processing.Load() }
-func (p *Provider) SetProcessing(v bool)            { p.processing.Store(v) }
-func (p *Provider) IsPaused() bool                  { return p.paused.Load() }
-func (p *Provider) SetPaused(v bool)                { p.paused.Store(v) }
+func (p *Provider) IsConnected() bool {
+	if p.conn == nil {
+		return false
+	}
+	return p.conn.IsConnected()
+}
+func (p *Provider) GPUState() gpu.State {
+	if p.monitor == nil {
+		return gpu.StateAvailable
+	}
+	return p.monitor.GetState()
+}
+func (p *Provider) GPUUtilization() int {
+	if p.monitor == nil {
+		return 0
+	}
+	return p.monitor.GetUtilization()
+}
+func (p *Provider) GPUSupported() (bool, string) {
+	if p.monitor == nil {
+		return false, "not initialized"
+	}
+	return p.monitor.GPUSupported()
+}
+func (p *Provider) GPUDriverInfo() (string, string) {
+	if p.monitor == nil {
+		return "", ""
+	}
+	return p.monitor.GPUDriverInfo()
+}
+func (p *Provider) LLMReachable() (bool, string) {
+	if p.llmClient == nil {
+		return false, "not configured"
+	}
+	return p.llmClient.IsReachable()
+}
+func (p *Provider) Fingerprint() string   { return p.id.Fingerprint }
+func (p *Provider) Model() string         { return p.model }
+func (p *Provider) Quantisation() string  { return p.quantisation }
+func (p *Provider) UnitsProcessed() int64 { return p.units.Load() }
+func (p *Provider) Uptime() time.Duration { return time.Since(p.startedAt) }
+func (p *Provider) IncrementUnits()       { p.units.Add(1) }
+func (p *Provider) IsProcessing() bool    { return p.processing.Load() }
+func (p *Provider) SetProcessing(v bool)  { p.processing.Store(v) }
+func (p *Provider) IsPaused() bool        { return p.paused.Load() }
+func (p *Provider) SetPaused(v bool)      { p.paused.Store(v) }

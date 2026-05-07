@@ -4,8 +4,27 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
+
+// DefaultManagerURL is a fixed-size sentinel that can be replaced at binary distribution time.
+// The manager's download endpoint patches this with the real WSS URL (null-padded to 256 bytes).
+// If still set to the sentinel (or empty), the client starts in unconfigured mode.
+var DefaultManagerURL = "$$SYNERGIA_MANAGER_URL$$\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+
+// resolveManagerURL returns the effective manager URL from (in priority order):
+// 1. CLI flag / env var (if non-empty and not the sentinel)
+// 2. Patched sentinel value (if patched)
+// 3. Empty string (unconfigured)
+func resolveManagerURL() string {
+	// Strip null padding from sentinel
+	url := strings.TrimRight(DefaultManagerURL, "\x00")
+	if url == "$$SYNERGIA_MANAGER_URL$$" || url == "" {
+		return ""
+	}
+	return url
+}
 
 type Config struct {
 	ManagerURL          string
@@ -22,12 +41,16 @@ type Config struct {
 	AutoApprove         bool
 	Insecure            bool
 	TLSCACert           string
+	Unconfigured        bool // true when no manager URL is available
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{}
 
-	flag.StringVar(&cfg.ManagerURL, "manager-url", envOrDefault("CLUSTER_MANAGER_URL", "wss://localhost:7500/ws/worker"), "WebSocket URL of the cluster manager")
+	// Resolve the effective default: env var > patched sentinel > empty
+	defaultURL := envOrDefault("CLUSTER_MANAGER_URL", resolveManagerURL())
+
+	flag.StringVar(&cfg.ManagerURL, "manager-url", defaultURL, "WebSocket URL of the cluster manager")
 	flag.StringVar(&cfg.WorkerKey, "worker-key", os.Getenv("CLUSTER_WORKER_KEY"), "Shared secret for WebSocket auth")
 	flag.StringVar(&cfg.LLMURL, "llm-url", envOrDefault("WORKER_LLM_URL", "http://localhost:8080"), "Local llama-server endpoint")
 	flag.StringVar(&cfg.Model, "model", os.Getenv("WORKER_MODEL"), "Model name to report")
@@ -59,6 +82,21 @@ func Load() (*Config, error) {
 	}
 
 	// Validate required fields
+	// Check for a saved manager-url file (from setup mode)
+	if cfg.ManagerURL == "" {
+		if saved, err := os.ReadFile(cfg.DataDir + "/manager-url"); err == nil {
+			url := strings.TrimSpace(string(saved))
+			if url != "" {
+				cfg.ManagerURL = url
+			}
+		}
+	}
+
+	if cfg.ManagerURL == "" {
+		cfg.Unconfigured = true
+		// In unconfigured mode, relax other requirements
+		return cfg, nil
+	}
 	if cfg.WorkerKey == "" {
 		return nil, fmt.Errorf("--worker-key or CLUSTER_WORKER_KEY is required")
 	}
