@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -107,6 +108,18 @@ func Load() (*Config, error) {
 		}
 	default:
 		return nil, fmt.Errorf("invalid CLUSTER_MODEL_BACKEND %q: must be \"filesystem\" or \"s3\"", cfg.ModelBackend)
+	}
+
+	// Ensure filesystem directories exist
+	for _, dir := range []string{cfg.CacheDir, cfg.ClientBinaryDir, filepath.Dir(cfg.DBPath)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("failed to create directory %q: %w", dir, err)
+		}
+	}
+	if cfg.ModelBackend == "filesystem" {
+		if err := os.MkdirAll(cfg.ModelPath, 0o755); err != nil {
+			return nil, fmt.Errorf("failed to create directory %q: %w", cfg.ModelPath, err)
+		}
 	}
 
 	return cfg, nil
