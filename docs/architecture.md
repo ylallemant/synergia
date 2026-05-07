@@ -1,4 +1,4 @@
-# Distributed Worker Network — "DeepThink@Home"
+# Distributed Worker Network — Synergia
 
 > Inspired by SETI@home / BOINC: a volunteer-driven compute mesh where community members donate idle GPU time for document ingestion and inference workloads.
 
@@ -24,7 +24,7 @@ LLM inference (especially for ingestion) is embarrassingly parallel — each doc
 │        │               │                                     │
 │  ┌─────▼───────────────▼──────────────────────────────────┐  │
 │  │              WebSocket Gateway (WSS)                   │  │
-│  │         wss://cluster.deepthink.io/worker              │  │
+│  │         wss://<manager-host>/ws/worker                 │  │
 │  └────────────────────────┬───────────────────────────────┘  │
 └───────────────────────────│──────────────────────────────────┘
                             │
@@ -46,9 +46,9 @@ LLM inference (especially for ingestion) is embarrassingly parallel — each doc
 
 | Component | Description | Details |
 |---|---|---|
-| **Cluster Manager** | Central coordinator — OpenAI-compatible API, WebSocket gateway, work queue, admin dashboard | [tools/cluster-manager/README.md](../../tools/cluster-manager/README.md) |
-| **Cluster Client** | Worker daemon — connects to manager, runs local LLM inference, local dashboard | [tools/cluster-client/README.md](../../tools/cluster-client/README.md) |
-| **Integration Test** | End-to-end test harness for the full pipeline | [tools/cluster-test/README.md](../../tools/cluster-test/README.md) |
+| **Cluster Manager** | Central coordinator — OpenAI-compatible API, WebSocket gateway, work queue, admin dashboard | [docs/manager/README.md](../manager/README.md) |
+| **Cluster Client** | Worker daemon — connects to manager, runs local LLM inference, local dashboard | [docs/client/README.md](../client/README.md) |
+| **Integration Test** | End-to-end test harness for the full pipeline | [docs/test/README.md](../test/README.md) |
 
 ## Communication Protocol
 
@@ -66,7 +66,7 @@ No router configuration. No port forwarding. Works from corporate networks, home
 
 Workers connect via `wss://<manager>/ws/worker` with authentication headers (fingerprint, public key, model info). The manager pushes work units as JSON messages; the worker returns results signed with its Ed25519 private key. A heartbeat mechanism maintains liveness.
 
-For the full protocol specification (headers, message types, JSON schemas), see the [Cluster Manager README — Protocol section](../../tools/cluster-manager/README.md#protocol-phase-1--simplified).
+For the full protocol specification (headers, message types, JSON schemas), see the [Cluster Manager README — Protocol section](../manager/README.md#protocol-phase-1--simplified).
 
 ## Integration with Flow Engine
 
@@ -78,7 +78,7 @@ Distributed: LLM Node → HTTP → Cluster Manager → WSS → Worker → local 
 ```
 
 ```env
-LLM_BASE_URL=https://cluster.deepthink.io
+LLM_BASE_URL=https://<manager-host>:7500
 LLM_API_KEY=<internal-service-key>
 LLM_MODEL=mistral-small-3.2-24b-instruct-2506
 ```
@@ -89,13 +89,13 @@ This means **zero changes to the flow engine** — it's completely transparent.
 
 Each worker generates a persistent **Ed25519 keypair** on first run. The fingerprint (`SHA256(public_key)`) is the worker's unique identity across all communication. Result payloads are signed with the private key, enabling non-repudiation.
 
-For identity storage, encryption details, and key rotation semantics, see the [Cluster Client README — Worker Identity](../../tools/cluster-client/README.md#worker-identity-fingerprint).
+For identity storage, encryption details, and key rotation semantics, see the [Cluster Client README — Worker Identity](../client/README.md#worker-identity-fingerprint).
 
 ## Data Collection Consent
 
 Workers must **explicitly accept** data collection before receiving work units. Consent covers hardware statistics and configuration preferences. Without consent, the worker connects but remains idle.
 
-See [Cluster Client README — Consent & Configuration](../../tools/cluster-client/README.md#consent--configuration).
+See [Cluster Client README — Consent & Configuration](../client/README.md#consent--configuration).
 
 ## GPU Contention Detection
 
@@ -113,7 +113,7 @@ The worker daemon detects external GPU usage (gaming, rendering) via platform AP
 | **Ingestion** | 8 GB | Metadata, chunking, entities | `mistral-small` (Q4, ~4.5GB) |
 | **Full** | 16 GB | All above + inference queries | `mistral-small` (Q6/F16) or larger |
 
-Role eligibility is managed by the cluster manager via role-model mappings with VRAM thresholds. See [Cluster Manager README — Role Administration](../../tools/cluster-manager/README.md#role-administration-endpoints-authenticated-with-api-key).
+Role eligibility is managed by the cluster manager via role-model mappings with VRAM thresholds. See [Cluster Manager README — Role Administration](../manager/README.md#role-administration-endpoints-authenticated-with-api-key).
 
 ## Tamper Resistance (Phase 2+)
 
@@ -122,7 +122,7 @@ The fundamental challenge: **the worker controls the hardware**. They can return
 | Layer | Mechanism | Status |
 |---|---|---|
 | Transport security | TLS + shared key auth (Phase 1), mTLS (Phase 2) | Phase 1 implemented |
-| Result signing | Ed25519 signatures on every result | Implemented (stored, not yet verified) |
+| Result signing | Ed25519 signatures on every result | Implemented (received, not yet persisted or verified) |
 | Redundant processing | Send each work unit to N workers, compare results | Phase 2 |
 | Canary work units | Inject known-good test cases at random intervals | Phase 2 |
 | Deterministic mode | `temperature=0` + fixed model for reproducible outputs | Phase 2 |

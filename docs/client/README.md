@@ -6,7 +6,7 @@ See [Architecture](../architecture.md) for the full design.
 
 ## Phase 1 — Proof of Concept
 
-Minimal implementation: CLI-only, connects to a single cluster manager, shells out to a local `llama-server` instance for inference. No UI, no system tray, no auto-start.
+Minimal implementation: connects to a single cluster manager, shells out to a local `llama-server` instance for inference. Includes local web dashboard, system tray, and auto-start.
 
 ### Scope
 

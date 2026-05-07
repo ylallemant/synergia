@@ -31,7 +31,7 @@ Minimal implementation: single worker, no trust system, no redundancy. The goal 
 - **Admin dashboard**: auto-refreshing HTML page on the admin port showing connected workers, role distribution, today's payloads, and recent client errors
 - **SQLite + PostgreSQL** storage (GORM): worker registry, work unit history, consent, config, client errors, latency samples
 - **TLS** with optional HTTP→HTTPS redirect server
-- **Result signing** recorded (signature stored in DB for future verification)
+- **Result signing** received (signature is passed through the protocol but not yet persisted in DB)
 - **Model update push**: when an admin updates a role-model mapping, the manager computes the expected `llmHash`, pushes a `model_update` message to connected workers for that role, and tracks their `sync_status` (`synced` / `out-of-sync`)
 - **Dual-status model**: each worker has a `status` (client-reported) and a `sync_status` (manager-derived from LLM hash comparison). Only workers with both `available` + `synced` receive work dispatch
 
@@ -41,7 +41,7 @@ Minimal implementation: single worker, no trust system, no redundancy. The goal 
 - mTLS (Phase 1 uses TLS + shared API key auth)
 - Persistent work queue (Postgres-backed in-flight survival)
 - Multiple simultaneous workers
-- Result signature verification (signatures are stored but not validated yet)
+- Result signature storage and verification (signatures are received but not yet persisted or validated)
 
 ## Project Structure
 
@@ -291,10 +291,10 @@ The cluster manager exposes an **OpenAI-compatible API** plus cluster-specific e
 
 The batch endpoint provides **Scaleway-style** asynchronous request processing:
 
-1. Client submits a request via `POST /v1/batch` — immediately receives a request ID
+1. Client submits a request via `POST /v1/batches` — immediately receives a request ID
 2. The request is stored in the database with status `pending`
 3. A background processor picks up pending requests in FIFO order when a worker becomes available
-4. Client polls `GET /v1/batch?id=<id>` to check status and retrieve the result
+4. Client polls `GET /v1/batches?id=<id>` to check status and retrieve the result
 
 This is useful when the live endpoint returns 429 (all workers busy/paused). Instead of retrying, callers can submit to the batch queue and poll for completion.
 
