@@ -9,6 +9,8 @@ A SETI@home-inspired volunteer GPU compute mesh that turns idle GPUs into a shar
 
 ## Architecture
 
+See [docs/architecture.md](docs/architecture.md) for the full design.
+
 ```
 ┌─────────────────┐        OpenAI API          ┌──────────────────┐
 │  Flow Engine /  │ ──────────────────────────▶│                  │

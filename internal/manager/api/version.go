@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/rs/zerolog/log"
+	"github.com/ylallemant/synergia/internal/manager/cache"
 	"github.com/ylallemant/synergia/internal/manager/gateway"
 	"github.com/ylallemant/synergia/internal/manager/store"
 )
@@ -16,13 +17,15 @@ type VersionAPI struct {
 	apiKey  string
 	store   *store.Store
 	gateway *gateway.Gateway
+	cache   *cache.Cache
 }
 
-func NewVersionAPI(apiKey string, s *store.Store, gw *gateway.Gateway) *VersionAPI {
+func NewVersionAPI(apiKey string, s *store.Store, gw *gateway.Gateway, c *cache.Cache) *VersionAPI {
 	return &VersionAPI{
 		apiKey:  apiKey,
 		store:   s,
 		gateway: gw,
+		cache:   c,
 	}
 }
 
@@ -173,4 +176,32 @@ func (v *VersionAPI) BinaryDownloadHandler(w http.ResponseWriter, r *http.Reques
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
 	}
 	io.Copy(w, resp.Body)
+}
+
+// synergiaReleasesURL is the GitHub Releases API for the synergia project.
+// AdminVersionTagsHandler returns recent release tags from GitHub for the client binary.
+// GET /v1/admin/version/tags
+func (v *VersionAPI) AdminVersionTagsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Authorization") != "Bearer "+v.apiKey {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	tags := v.cache.GetClientTags()
+	if len(tags) == 0 {
+		var err error
+		tags, err = v.cache.RefreshClientTags()
+		if err != nil {
+			log.Error().Err(err).Msg("failed to fetch synergia release tags")
+			http.Error(w, "failed to fetch tags: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"tags": tags})
 }

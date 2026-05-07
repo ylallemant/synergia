@@ -25,7 +25,7 @@ Minimal implementation: connects to a single cluster manager, shells out to a lo
 - **LLM health monitoring**: periodic background health checks against the local `llama-server` endpoint with reachability state exposed to the dashboard
 - **Data collection consent**: interactive or auto-approve; syncs consent state with the cluster manager (work units are gated on consent)
 - **Worker configuration**: processing preferences (max model size, quant, context, preferred role) stored locally and synced to manager
-- **Local web dashboard** (`http://127.0.0.1:9876`): connection status, consent banner, config form, hardware info review, live statistics, auto-start toggle
+- **Local web dashboard** (`http://127.0.0.1:9876`): connection status, consent banner, config form (role auto-syncs on change — no save button), hardware info review, live statistics, auto-start toggle
 - **Auto-start**: register/unregister the client to start on OS login (macOS LaunchAgent, Linux systemd user service); status read directly from OS — no config file
 - **System tray**: macOS/Linux tray icon showing connection state (🟢/🔵/🟡/⚫/🔴) with Pause/Resume/Quit menu
 - **Hardware info collection**: OS, CPU, GPU, VRAM, RAM — reported to manager after consent
@@ -34,6 +34,7 @@ Minimal implementation: connects to a single cluster manager, shells out to a lo
 - **Client version**: reports version to manager via `X-Worker-Version` header on WebSocket connection
 - **Platform reporting**: reports `X-Worker-OS` and `X-Worker-Arch` headers (`runtime.GOOS`/`runtime.GOARCH`) on WebSocket connect, enabling the manager to resolve platform-specific binary artifacts
 - **Binary auto-update**: receives `binary_update` push from manager, downloads new binary (GitHub releases with manager proxy fallback), verifies SHA256, self-replaces with atomic rename (Unix) or helper shim (Windows), restarts. Previous binary kept as `.bak` for rollback if reconnect fails within 60s
+- **Backend auto-update**: receives `backend_update` push from manager, downloads the full release archive (tar.gz/zip) from upstream or manager fallback, extracts all files (binaries, shared libraries, symlinks) into the backend directory, restarts `llama-server` with the new binary
 - **Windows update helper**: separate `synergia-updater.exe` handles locked-file replacement on Windows. Downloaded from the same release on first need; version kept in sync with client
 
 ### Out of Scope (Phase 2+)
@@ -87,6 +88,8 @@ cmd/synergia-client/ + internal/client/
     │   ├── prober_linux.go           # Linux GPU prober (nvidia-smi, rocm-smi)
     │   ├── prober_windows.go         # Windows GPU prober (nvidia-smi)
     │   └── prober_other.go           # Fallback (noop)
+    ├── backend/
+    │   └── manager.go               # Backend binary management (download, extract, verify, restart)
     ├── server/
     │   ├── server.go                # Local dashboard HTTP server (:9876)
     │   └── static/                  # Embedded HTML + CSS for dashboard
@@ -108,7 +111,7 @@ cmd/synergia-client/ + internal/client/
 | `--llm-url` / `WORKER_LLM_URL` | `http://localhost:8080` | Local `llama-server` endpoint |
 | `--model` / `WORKER_MODEL` | (required) | Model name to report (e.g., `mistral-small-3.2-24b-instruct-2506`) |
 | `--quantisation` / `WORKER_QUANTISATION` | `Q4_K_M` | Quantisation level to report |
-| `--role` / `WORKER_ROLE` | `embedding` | Worker role (`embedding`, `inference`, `ingestion`) |
+| `--role` / `WORKER_ROLE` | `tester` | Worker role (`tester`, `embedding`, `inference`, `ingestion`) |
 | `--model-file` / `WORKER_MODEL_FILE` | (empty) | Path to the GGUF model file (for LLM hash verification) |
 | `--data-dir` / `CLUSTER_CLIENT_DATA_DIR` | `~/.synergia/worker/` | Directory for identity keystore and local state |
 | `--auto-approve` / `CLUSTER_CLIENT_AUTO_APPROVE` | `false` | Automatically accept data collection consent on startup (for tests/CI) |
@@ -226,9 +229,11 @@ After accepting consent, the worker can configure its preferred role:
 
 | Field | Description |
 |---|---|
-| `preferred_role` | Preferred task type: `embedding`, `inference`, or `ingestion` |
+| `preferred_role` | Preferred task type: `tester`, `embedding`, `inference`, or `ingestion` |
 
-Role eligibility is determined by the cluster manager based on the worker's reported VRAM and the manager-controlled role-model mapping. The worker can only select roles it is eligible for.
+The **tester** role is always eligible regardless of hardware — it uses a minimal model (SmolLM2-135M) and allows any machine to participate in the cluster. If the worker's VRAM is insufficient for other roles, the client preselects "tester" automatically.
+
+For other roles, eligibility is determined by the cluster manager based on the worker's reported VRAM and the manager-controlled role-model mapping. The worker can only select roles it is eligible for.
 
 Configuration is stored locally in `<data-dir>/config.json` and synced to the manager via `POST /v1/worker-config`.
 
@@ -323,6 +328,44 @@ On **first run**, the client generates a persistent cryptographic identity:
 ### Key Rotation
 
 If the identity files are deleted, a new keypair is generated on next start — the worker appears as a new worker to the cluster (starts at trust score 0). This is intentional: identity loss = trust loss.
+
+## Backend Management
+
+The client manages the local `llama-server` backend binary lifecycle. When the cluster manager pushes a `backend_update` message (containing a version and download URL), the client:
+
+1. **Downloads the archive** — tries the direct URL first (e.g. GitHub release), falls back to the manager's caching proxy (`/v1/backend/download?version=...&os=...&arch=...`)
+2. **Extracts all files** — the archive (tar.gz on Unix, zip on Windows) is extracted flat into `<data-dir>/backend/`. All regular files and symlinks are preserved. This is critical because `llama-server` links against companion shared libraries (e.g. `libllama-common.0.dylib` on macOS)
+3. **Verifies SHA256** — if the manager provides an expected hash, the extracted binary is validated
+4. **Restarts llama-server** — the worker stops the running `llama-server` process and starts the new binary
+
+### Archive Structure
+
+llama.cpp release archives contain a subdirectory (e.g. `llama-b9049/`) with:
+- `llama-server` (the main binary)
+- Shared libraries (e.g. `libllama.0.0.9049.dylib`, `libggml-metal.0.11.0.dylib`)
+- Symlinks (e.g. `libllama-common.0.dylib` → `libllama-common.0.0.9049.dylib`)
+
+The extractor flattens this structure, placing all files as `basename` in the backend directory. Symlinks are recreated pointing to the target's basename.
+
+### Storage Layout
+
+```
+<data-dir>/backend/
+├── llama-server                    # Main binary
+├── libllama-common.0.dylib         # Symlink → libllama-common.0.0.9049.dylib
+├── libllama-common.0.0.9049.dylib  # Actual shared library
+├── libllama.0.0.9049.dylib
+├── libggml-metal.0.11.0.dylib
+└── ...                             # Other libraries and binaries
+```
+
+### Platform Details
+
+| OS | Archive Format | Library Extension | Loader |
+|---|---|---|---|
+| macOS | `.tar.gz` | `.dylib` | `@rpath` resolves to binary directory |
+| Linux | `.tar.gz` | `.so` | `LD_LIBRARY_PATH` or `$ORIGIN` rpath |
+| Windows | `.zip` | `.dll` | Same directory as executable |
 
 ## Prerequisites (Phase 1)
 

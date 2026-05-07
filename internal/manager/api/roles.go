@@ -101,7 +101,7 @@ func (r *RolesAPI) RolesHandler(w http.ResponseWriter, req *http.Request) {
 			Quantisation: rm.Quantisation,
 			MinVRAMMB:    rm.MinVRAMMB,
 			Description:  rm.Description,
-			Eligible:     workerVRAM >= rm.MinVRAMMB,
+			Eligible:     rm.Role == "tester" || workerVRAM >= rm.MinVRAMMB,
 		}
 		result = append(result, info)
 	}
@@ -171,6 +171,20 @@ func (r *RolesAPI) AdminRolesHandler(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+
+	case http.MethodDelete:
+		role := req.URL.Query().Get("role")
+		if role == "" {
+			writeError(w, http.StatusBadRequest, "role query parameter is required")
+			return
+		}
+		if err := r.store.DeleteRoleModel(role); err != nil {
+			writeError(w, http.StatusInternalServerError, "database error")
+			return
+		}
+		log.Info().Str("role", role).Msg("role-model mapping deleted")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 

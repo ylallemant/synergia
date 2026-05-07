@@ -29,6 +29,7 @@
                 <li><strong>Fingerprint</strong> — a unique cryptographic identity for this worker</li>
                 <li><strong>Hardware statistics</strong> — OS + version, GPU + VRAM + driver/version, CPU + core count, RAM</li>
                 <li><strong>Configuration preferences</strong> — model size limits, quantisation, preferred role</li>
+                <li><strong>Automatic updates</strong> — the client will download backend binaries (e.g. llama-server) and self-update when instructed by the cluster manager</li>
             </ul>
             <p>This data is tied to your worker fingerprint and used by the cluster manager to schedule work efficiently. No personal information is collected.</p>
             <div class="consent-actions">
@@ -62,6 +63,7 @@
                 <li><strong>Fingerprint</strong> — a unique cryptographic identity for this worker</li>
                 <li><strong>Hardware statistics</strong> — OS + version, GPU + VRAM + driver/version, CPU + core count, RAM</li>
                 <li><strong>Configuration preferences</strong> — model size limits, quantisation, preferred role</li>
+                <li><strong>Automatic updates</strong> — the client will download backend binaries (e.g. llama-server) and self-update when instructed by the cluster manager</li>
             </ul>
             <p>This data is tied to your worker fingerprint and used by the cluster manager to schedule work efficiently. No personal information is collected.</p>
             <div class="data-preview-section">
@@ -111,9 +113,6 @@
                     <select id="cfg-role"></select>
                 </div>
                 <div id="role-details" class="role-details"></div>
-                <div class="form-actions">
-                    <button class="btn btn-save" onclick="saveConfig()">Save &amp; Sync</button>
-                </div>
             </div>
         </div>
 
@@ -280,26 +279,15 @@
 
                 const hasEligible = roles.some(r => r.eligible);
                 if (!hasEligible) {
+                    // This should not happen since "tester" is always eligible,
+                    // but handle gracefully just in case.
                     noRolesBanner.classList.remove('hidden');
                     roleForm.classList.add('hidden');
-                    // Still show roles as disabled for information
-                    roleDetails.innerHTML = '<p style="color:#888;margin-top:0.5rem;">Available roles (all require more VRAM):</p><ul style="color:#888;font-size:0.85rem;">' +
-                        roles.map(r => '<li>' + r.role + ' — requires ' + (r.min_vram_mb >= 1024 ? (r.min_vram_mb / 1024).toFixed(0) + ' GB' : r.min_vram_mb + ' MB') + ' VRAM (' + r.model + ' ' + r.quantisation + ')</li>').join('') +
-                        '</ul>';
-                    roleDetails.parentElement.appendChild(roleDetails);
-                    noRolesBanner.after(roleDetails);
-                    roleDetails.classList = 'role-details';
                     return;
                 }
 
                 noRolesBanner.classList.add('hidden');
                 roleForm.classList.remove('hidden');
-
-                // Add "Any eligible" option
-                const anyOpt = document.createElement('option');
-                anyOpt.value = 'any';
-                anyOpt.textContent = 'Any eligible role';
-                roleSelect.appendChild(anyOpt);
 
                 for (const role of roles) {
                     const opt = document.createElement('option');
@@ -312,12 +300,28 @@
                     roleSelect.appendChild(opt);
                 }
 
-                if (currentRole) {
+                // Preselect: use saved preference, or fall back to 'tester' if
+                // no other role is eligible
+                if (currentRole && !roleSelect.querySelector('option[value="' + currentRole + '"]')?.disabled) {
                     roleSelect.value = currentRole;
+                } else {
+                    const eligibleNonTester = roles.some(r => r.eligible && r.role !== 'tester');
+                    roleSelect.value = eligibleNonTester ? roles.find(r => r.eligible && r.role !== 'tester').role : 'tester';
                 }
 
-                // Show role details on change
-                roleSelect.addEventListener('change', () => updateRoleDetails(roles, roleSelect.value));
+                // Show role details on change and auto-sync
+                let lastSyncedRole = roleSelect.value;
+                roleSelect.addEventListener('change', async () => {
+                    updateRoleDetails(roles, roleSelect.value);
+                    if (roleSelect.value !== lastSyncedRole) {
+                        const resp = await fetch('/api/config', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({preferred_role: roleSelect.value})
+                        });
+                        if (resp.ok) lastSyncedRole = roleSelect.value;
+                    }
+                });
                 updateRoleDetails(roles, roleSelect.value);
                 rolesLoaded = true;
             } catch (e) {
@@ -327,11 +331,6 @@
 
         function updateRoleDetails(roles, selected) {
             const details = document.getElementById('role-details');
-            if (selected === 'any') {
-                const eligible = roles.filter(r => r.eligible);
-                details.innerHTML = '<p style="color:#aaa;font-size:0.85rem;margin-top:0.5rem;">Eligible for: ' + eligible.map(r => r.role).join(', ') + '</p>';
-                return;
-            }
             const role = roles.find(r => r.role === selected);
             if (role) {
                 details.innerHTML = '<p style="color:#aaa;font-size:0.85rem;margin-top:0.5rem;">' + role.description + '<br>Model: ' + role.model + ' (' + role.quantisation + ') — min ' + (role.min_vram_mb >= 1024 ? (role.min_vram_mb / 1024).toFixed(0) + ' GB' : role.min_vram_mb + ' MB') + ' VRAM</p>';
@@ -360,22 +359,7 @@
             refresh();
         }
 
-        async function saveConfig() {
-            const config = {
-                preferred_role: document.getElementById('cfg-role').value
-            };
-            const resp = await fetch('/api/config', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(config)
-            });
-            if (resp.ok) {
-                alert('Configuration saved and synced with manager.');
-            } else {
-                const err = await resp.text();
-                alert('Failed to save: ' + err);
-            }
-        }
+
 
         function formatUptime(seconds) {
             if (!seconds) return '—';

@@ -18,13 +18,22 @@ cd test && go run .
 
 | Flag | Description |
 |---|---|
-| `--keep-alive` | After tests pass, keep all services running and wait for Ctrl+C. Skips the PAUSE trigger test (step 13), batch-of-3 test (step 14), PANIC trigger test (step 15), and consent withdrawal test (step 16) to keep the client alive. Sends background payloads and batch requests. |
+| `--keep-alive` | After tests pass, keep all services running and wait for Ctrl+C. Skips the PAUSE trigger test (step 14), batch-of-3 test (step 15), PANIC trigger test (step 16), consent withdrawal test (step 17), and backend test (step 21) to keep the client alive. Sends background payloads and batch requests. |
+| `--run` | Start all services in development mode **without running any tests**. Launches llama-server, cluster-manager (`--development`), and cluster-client (role=tester, `--auto-approve`). Sends background payloads and batches. Graceful shutdown on SIGTERM/SIGINT (client → manager → llama-server). |
 
 ### Interactive Mode
 
 ```bash
 cd test && go run . --keep-alive
 ```
+
+### Development Mode (no tests)
+
+```bash
+cd test && go run . --run
+```
+
+Starts all services immediately without running the test suite. Useful for manual exploration, UI development, or debugging. Background goroutines send random payloads and batches to keep the cluster active. Press Ctrl+C for graceful shutdown (services are stopped in reverse order with a 5 s timeout each).
 
 When `--keep-alive` is set, after all tests complete the test prints:
 - Dashboard URL: `http://127.0.0.1:9876/static/index.html`
@@ -62,7 +71,10 @@ The synergia-client's system tray icon (🟢/🟡/⚫/🔴) appears in the macOS
 | 17 | Consent withdrawal + 429 + re-accept *(skipped with `--keep-alive`)* | Consent revocation via client API, 429 when withdrawn, batch queue during withdrawal, re-accept restores worker |
 | 18 | Query `GET /v1/errors` and verify reports stored | Error persistence in DB |
 | 19 | Query admin port `/v1/latency`, verify 3+ samples in matrix; check `latency_samples` and `workers.total_requests` in SQLite | Latency recording + adaptive bucketing |
-| 20 | Collect output files | Final state capture |
+| 20 | Test version admin API | Binary update push, platform awareness |
+| 21 | Test backend admin API with real llama.cpp release *(skipped with `--keep-alive`)* | Backend download, extraction with symlinks, `--version` verification, upgrade to newer release |
+| 22 | Collect output files | Final state capture |
+| 21 | Backend admin API with real llama.cpp release *(skipped with `--keep-alive`)* | Backend download, install, verify, upgrade |
 
 ### Step 12 Detail: LLM Hash Verification + Model Update Push
 
@@ -116,6 +128,23 @@ This step validates that consent revocation properly gates work unit dispatch:
 7. Send a normal completion → verify it succeeds
 8. Poll the batch request queued during withdrawal → verify it completed
 
+### Step 21 Detail: Backend Admin API with Real llama.cpp Release
+
+*(Skipped with `--keep-alive`)*
+
+This step validates the full backend binary lifecycle using real llama.cpp releases:
+
+1. **Set backend version b9049** — `POST /v1/admin/backend` with `{"name": "llama.cpp", "version": "b9049"}`
+2. **Worker downloads archive** — primary URL fails (TLS interception in test environment), falls back to manager's caching proxy
+3. **Manager fetches and caches** — downloads the full tar.gz from GitHub, caches it by `{version}-{os}-{arch}` key
+4. **Worker extracts all files** — extracts binaries, shared libraries, and symlinks into `<data-dir>/backend/`
+5. **Worker restarts llama-server** — kills old process, starts new binary
+6. **Verify binary** — runs `llama-server --version`, checks it outputs version info without crashing (validates that shared libraries are correctly extracted and symlinked)
+7. **Verify admin GET** — `GET /v1/admin/backend` returns `version=b9049`
+8. **Upgrade to b9050** — `POST /v1/admin/backend` with `{"name": "llama.cpp", "version": "b9050"}`
+9. **Worker upgrades** — downloads b9050 via manager fallback, extracts, restarts
+10. **Verify upgrade** — confirms the client log shows b9050 installed
+
 ## Output
 
 All logs and responses are saved to `test/runs/<timestamp>/`:
@@ -154,7 +183,7 @@ All values are hardcoded for isolation — the test uses:
 - API key: `test-api-key`
 - Worker key: `test-worker-key`
 - TLS certificates: auto-generated in `testdata/tls/` (self-signed CA + localhost cert)
-- `CLUSTER_TEST_SETUP=true`: seeds role-model mappings with minimal test thresholds (512 MB VRAM, SmolLM2-135M-Instruct) so any hardware can run all roles
+- `CLUSTER_TEST_SETUP=true`: seeds role-model mappings with minimal test thresholds (512 MB VRAM, SmolLM2-135M-Instruct) so any hardware can run all roles. Note: the `tester` role (SmolLM2-135M, 512 MB) is always seeded regardless of this flag
 
 ## Checking Test Results
 

@@ -19,6 +19,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/ylallemant/synergia/internal/client/autostart"
+	"github.com/ylallemant/synergia/internal/client/backend"
 	"github.com/ylallemant/synergia/internal/client/branding"
 	"github.com/ylallemant/synergia/internal/client/config"
 	"github.com/ylallemant/synergia/internal/client/connection"
@@ -155,6 +156,16 @@ func main() {
 		log.Info().Msg("restarting after binary update")
 		os.Exit(0) // systemd/launchd/autostart will restart the process
 	})
+
+	// Configure backend (llama-server) manager
+	backendMgr := backend.New(cfg.WorkerKey, managerHTTPURL, cfg.DataDir)
+	conn.SetBackendHash(backendMgr.Hash())
+	w.SetBackendManager(backendMgr, func() error {
+		// TODO: restart llama-server process with new binary path
+		log.Info().Str("path", backendMgr.BinaryPath()).Msg("backend updated — llama-server restart needed")
+		return nil
+	})
+
 	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr)
 	adminURL := localAdminURL(cfg.ManagerURL, cfg.WorkerKey)
 	t := tray.New(sp, "http://"+dashboardAddr+"/static/index.html", adminURL)

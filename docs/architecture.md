@@ -109,9 +109,12 @@ The worker daemon detects external GPU usage (gaming, rendering) via platform AP
 
 | Tier | Min VRAM | Workload | Model |
 |---|---|---|---|
+| **Tester** | any | Connectivity testing | `SmolLM2-135M-Instruct` (Q4, ~100 MB) |
 | **Embeddings** | 4 GB | Vector embeddings only | `bge-m3` (Q4, ~2GB) |
 | **Ingestion** | 8 GB | Metadata, chunking, entities | `mistral-small` (Q4, ~4.5GB) |
 | **Full** | 16 GB | All above + inference queries | `mistral-small` (Q6/F16) or larger |
+
+The **tester** role is always available regardless of hardware — every worker can participate at minimum as a tester. This ensures connectivity verification and allows low-spec machines to contribute.
 
 Role eligibility is managed by the cluster manager via role-model mappings with VRAM thresholds. See [Cluster Manager README — Role Administration](../manager/README.md#role-administration-endpoints-authenticated-with-api-key).
 
@@ -200,7 +203,8 @@ Single worker, no trust system, no redundancy. Validates the end-to-end path. **
 - Auto-start (LaunchAgent / systemd / Registry)
 - Error reporting pipeline
 - Binary auto-update (GitHub releases, manager proxy fallback, staged/full rollout)
-- Admin configuration UI (version, role-model matrix, worker overview)
+- Backend auto-update (llama.cpp release download, manager caching proxy, full archive extraction with symlink handling)
+- Admin configuration UI (version, backend version, role-model matrix, worker overview)
 - Full integration test suite
 
 ### Phase 2: Multi-Worker
@@ -255,6 +259,51 @@ Admin sets version         Manager                              Worker
 **Windows**: A helper binary (`synergia-updater.exe`) handles the locked-file replacement. It's downloaded from the same release on first need, and kept version-synchronised with the client.
 
 **Rollback**: The previous binary is kept as `.bak`. If the new binary fails to reconnect within 60s, the auto-start mechanism restores the backup.
+
+## Backend Auto-Update
+
+The manager centrally controls the backend binary (e.g. `llama-server` from llama.cpp). When an admin sets a target backend version, the manager pushes `backend_update` messages to workers. The flow mirrors the binary update pipeline:
+
+```
+Admin sets backend version      Manager                              Worker
+      │                           │                                   │
+      │── POST /v1/admin/backend ▶│                                   │
+      │   { "name": "llama.cpp",  │                                   │
+      │     "version": "b9049" }  │                                   │
+      │                           │── backend_update ────────────────▶│
+      │                           │   (version, download_url)         │
+      │                           │                                   │
+      │                           │◀── status: "updating" ────────────│
+      │                           │                                   │── download archive
+      │                           │                                   │── extract all files
+      │                           │                                   │── restart llama-server
+      │                           │                                   │
+      │                           │◀── status: "available" ───────────│
+```
+
+### Supported Backends
+
+| Name | URL Template | Source |
+|---|---|---|
+| `llama.cpp` | `https://github.com/ggml-org/llama.cpp/releases/download/{version}/llama-{version}-bin-{platform}-{arch}.{ext}` | GitHub releases |
+
+Platform mapping: `darwin` → `macos`, `linux` → `ubuntu`, `windows` → `win-cpu`. Arch mapping: `amd64` → `x64`. Extension: `tar.gz` (Unix), `zip` (Windows).
+
+### Download Strategy
+
+Workers first try the direct GitHub release URL. If that fails (corporate firewalls, TLS interception), they fall back to the manager's caching proxy endpoint (`/v1/backend/download`). The manager downloads the archive once from upstream and caches it locally for subsequent worker requests.
+
+### Archive Extraction
+
+llama.cpp release archives contain the `llama-server` binary **plus shared libraries** (e.g. `libllama-common.0.dylib`) and symlinks. The client extracts **all files** (regular files and symlinks) from the archive into the backend directory, flattening the archive's subdirectory structure. This ensures the binary can find its companion libraries at runtime via `@rpath` (macOS) or `LD_LIBRARY_PATH` (Linux).
+
+### Admin UI
+
+The admin dashboard includes a Backend section with:
+- A **name dropdown** listing supported backends (currently: `llama.cpp`)
+- A **version dropdown** populated from GitHub tags via `/v1/admin/backend/tags`
+- A **refresh button** (↻) to re-fetch tags
+- An **Apply** button to set the target version
 
 ## Open Questions
 

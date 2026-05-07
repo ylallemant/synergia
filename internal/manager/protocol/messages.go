@@ -12,6 +12,7 @@ const (
 	TypeModelUpdate   = "model_update"    // manager → worker: new model configuration
 	TypeLLMHashReport = "llm_hash_report" // worker → manager: report current LLM hash
 	TypeBinaryUpdate  = "binary_update"   // manager → worker: new client binary available
+	TypeBackendUpdate = "backend_update"  // manager → worker: new backend binary available
 )
 
 // Envelope is the top-level WebSocket message wrapper.
@@ -92,6 +93,15 @@ type BinaryUpdate struct {
 	Version     string `json:"version"`
 	DownloadURL string `json:"download_url"`
 	FallbackURL string `json:"fallback_url"` // manager proxy download endpoint
+	SHA256      string `json:"sha256"`
+}
+
+// BackendUpdate is sent from manager to worker when a new backend version is available.
+type BackendUpdate struct {
+	Type        string `json:"type"`
+	Version     string `json:"version"`
+	DownloadURL string `json:"download_url"`
+	FallbackURL string `json:"fallback_url"` // manager cached proxy endpoint
 	SHA256      string `json:"sha256"`
 }
 

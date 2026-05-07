@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/ylallemant/synergia/internal/manager/cache"
 	"github.com/ylallemant/synergia/internal/manager/store"
 )
 
@@ -23,6 +24,7 @@ type Server struct {
 	apiKey      string
 	workerKey   string
 	store       *store.Store
+	cache       *cache.Cache
 	insecure    bool
 	tlsCertFile string
 	tlsKeyFile  string
@@ -31,12 +33,13 @@ type Server struct {
 }
 
 // New creates a new admin dashboard server.
-func New(addr, apiKey, workerKey string, s *store.Store, insecure bool, tlsCertFile, tlsKeyFile string) *Server {
+func New(addr, apiKey, workerKey string, s *store.Store, c *cache.Cache, insecure bool, tlsCertFile, tlsKeyFile string) *Server {
 	srv := &Server{
 		addr:        addr,
 		apiKey:      apiKey,
 		workerKey:   workerKey,
 		store:       s,
+		cache:       c,
 		insecure:    insecure,
 		tlsCertFile: tlsCertFile,
 		tlsKeyFile:  tlsKeyFile,
@@ -122,106 +125,75 @@ func (s *Server) authenticate(r *http.Request) bool {
 
 func (s *Server) collectData() dashboardData {
 	var data dashboardData
+	data.APIKey = s.apiKey
 
-	// Worker counts by status (aggregated: available = status available/online AND sync_status synced)
-	s.store.DB.Model(&store.Worker{}).Count(&data.TotalWorkers)
-	s.store.DB.Model(&store.Worker{}).Where("status IN ? AND sync_status = ?", []string{"available", "online"}, "synced").Count(&data.ReadyWorkers)
-	s.store.DB.Model(&store.Worker{}).Where("status = ? AND sync_status = ?", "processing", "synced").Count(&data.ProcessingWorkers)
-	s.store.DB.Model(&store.Worker{}).Where("status != ? AND NOT (status IN ? AND sync_status = ?) AND NOT (status = ? AND sync_status = ?)", "offline", []string{"available", "online"}, "synced", "processing", "synced").Count(&data.UnavailableWorkers)
-	s.store.DB.Model(&store.Worker{}).Where("status = ?", "offline").Count(&data.OfflineWorkers)
+	stats := s.cache.GetStats()
 
-	// Workers by role
-	type roleRow struct {
-		Role   string
-		Online int64
-		Total  int64
-	}
-	var roleRows []roleRow
-	s.store.DB.Raw(`
-		SELECT
-		  CASE WHEN wc.preferred_role IS NOT NULL AND wc.preferred_role != '' THEN wc.preferred_role ELSE 'inference' END AS role,
-		  COUNT(*) AS total,
-		  SUM(CASE WHEN w.status IN ('available','processing') THEN 1 ELSE 0 END) AS online
-		FROM workers w
-		LEFT JOIN worker_configs wc ON wc.fingerprint = w.fingerprint
-		GROUP BY role
-		ORDER BY role
-	`).Scan(&roleRows)
-	for _, rr := range roleRows {
-		data.RoleCounts = append(data.RoleCounts, roleCount{
-			Role:   rr.Role,
-			Online: rr.Online,
-			Total:  rr.Total,
-		})
+	data.TotalWorkers = stats.TotalWorkers
+	data.ReadyWorkers = stats.ReadyWorkers
+	data.ProcessingWorkers = stats.ProcessingWorkers
+	data.UnavailableWorkers = stats.UnavailableWorkers
+	data.OfflineWorkers = stats.OfflineWorkers
+
+	for _, rc := range stats.RoleCounts {
+		data.RoleCounts = append(data.RoleCounts, roleCount{Role: rc.Role, Online: rc.Online, Total: rc.Total})
 	}
 
-	// Today's work units
-	startOfDay := time.Now().Truncate(24 * time.Hour)
-	s.store.DB.Model(&store.WorkUnit{}).Where("created_at >= ?", startOfDay).Count(&data.TodayTotal)
-	s.store.DB.Model(&store.WorkUnit{}).Where("created_at >= ? AND status = ?", startOfDay, "completed").Count(&data.TodayCompleted)
-	s.store.DB.Model(&store.WorkUnit{}).Where("created_at >= ? AND status = ?", startOfDay, "timeout").Count(&data.TodayTimeout)
-	s.store.DB.Model(&store.WorkUnit{}).Where("created_at >= ? AND status = ?", startOfDay, "failed").Count(&data.TodayFailed)
-	s.store.DB.Model(&store.BatchRequest{}).Where("status IN ?", []string{"pending", "processing"}).Count(&data.TodayQueued)
+	data.TodayTotal = stats.TodayTotal
+	data.TodayCompleted = stats.TodayCompleted
+	data.TodayQueued = stats.TodayQueued
+	data.TodayTimeout = stats.TodayTimeout
+	data.TodayFailed = stats.TodayFailed
 
-	// Work units by role today
-	type roleWorkRow struct {
-		Role  string
-		Total int64
-	}
-	var rwRows []roleWorkRow
-	s.store.DB.Raw(`
-		SELECT role, COUNT(*) AS total
-		FROM latency_samples
-		WHERE created_at >= ?
-		GROUP BY role
-		ORDER BY role
-	`, startOfDay).Scan(&rwRows)
-	for _, rw := range rwRows {
-		data.RoleWorkCounts = append(data.RoleWorkCounts, roleWorkCount{
-			Role:  rw.Role,
-			Total: rw.Total,
-		})
+	for _, rw := range stats.RoleWorkCounts {
+		data.RoleWorkCounts = append(data.RoleWorkCounts, roleWorkCount{Role: rw.Role, Total: rw.Total})
 	}
 
-	// Last 10 errors
-	var errors []store.ClientError
-	s.store.DB.Order("reported_at desc").Limit(10).Find(&errors)
-	for _, e := range errors {
-		errMsg := e.ErrorMessage
-		if len(errMsg) > 120 {
-			errMsg = errMsg[:120] + "…"
-		}
+	for _, e := range stats.Errors {
 		data.Errors = append(data.Errors, errorEntry{
-			Fingerprint: truncFP(e.Fingerprint),
+			Fingerprint: e.Fingerprint,
 			Version:     e.Version,
-			Error:       errMsg,
-			ReportedAt:  e.ReportedAt.Format("2006-01-02 15:04:05"),
+			Error:       e.Error,
+			ReportedAt:  e.ReportedAt,
 		})
 	}
 
-	// Binary version config
-	if cfg, err := s.store.GetClientVersionConfig(); err == nil {
-		data.VersionTarget = cfg.TargetVersion
-		data.VersionRolloutMode = cfg.RolloutMode
-		data.VersionPercentage = cfg.RolloutPercentage
+	data.VersionTarget = stats.VersionTarget
+	data.VersionRolloutMode = stats.VersionRolloutMode
+	data.VersionPercentage = stats.VersionPercentage
+	data.WorkersSynced = stats.WorkersSynced
+	data.WorkersOutdated = stats.WorkersOutdated
+
+	data.BackendName = stats.BackendName
+	data.BackendVersion = stats.BackendVersion
+	data.BackendDownloadURL = stats.BackendDownloadURL
+	data.BackendSHA256Full = stats.BackendSHA256Full
+	sha := stats.BackendSHA256Full
+	if len(sha) > 16 {
+		sha = sha[:16] + "…"
 	}
-	if data.VersionTarget != "" {
-		s.store.DB.Model(&store.Worker{}).Where("status != ? AND client_version = ?", "offline", data.VersionTarget).Count(&data.WorkersSynced)
-		s.store.DB.Model(&store.Worker{}).Where("status != ? AND client_version != ?", "offline", data.VersionTarget).Count(&data.WorkersOutdated)
+	data.BackendSHA256 = sha
+	data.BackendSynced = stats.BackendSynced
+	data.BackendOutdated = stats.BackendOutdated
+
+	for _, r := range stats.Roles {
+		data.Roles = append(data.Roles, roleEntry{
+			Role:          r.Role,
+			Model:         r.Model,
+			Quantisation:  r.Quantisation,
+			Filename:      r.Filename,
+			ModelFileHash: r.ModelFileHash,
+			MinVRAMMB:     r.MinVRAMMB,
+			Description:   r.Description,
+		})
 	}
 
 	data.GeneratedAt = time.Now().Format("2006-01-02 15:04:05 MST")
 	return data
 }
 
-func truncFP(fp string) string {
-	if len(fp) > 12 {
-		return fp[:12] + "…"
-	}
-	return fp
-}
-
 type dashboardData struct {
+	APIKey             string
 	TotalWorkers       int64
 	ReadyWorkers       int64
 	ProcessingWorkers  int64
@@ -238,9 +210,28 @@ type dashboardData struct {
 	VersionTarget      string
 	VersionRolloutMode string
 	VersionPercentage  int
+	VersionSHA256      string
 	WorkersSynced      int64
 	WorkersOutdated    int64
+	BackendName        string
+	BackendVersion     string
+	BackendDownloadURL string
+	BackendSHA256Full  string
+	BackendSHA256      string
+	BackendSynced      int64
+	BackendOutdated    int64
+	Roles              []roleEntry
 	GeneratedAt        string
+}
+
+type roleEntry struct {
+	Role          string
+	Model         string
+	Quantisation  string
+	Filename      string
+	ModelFileHash string
+	MinVRAMMB     int
+	Description   string
 }
 
 type roleCount struct {

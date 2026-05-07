@@ -27,18 +27,20 @@ type Connection struct {
 	model        string
 	quantisation string
 	llmHash      string
+	backendHash  string
 	dialer       *websocket.Dialer
 
 	mu   sync.Mutex
 	conn *websocket.Conn
 
 	// Channels for incoming messages
-	WorkUnitCh     chan *protocol.WorkUnit
-	ModelUpdateCh  chan *protocol.ModelUpdate
-	BinaryUpdateCh chan *protocol.BinaryUpdate
-	done           chan struct{}
-	connectedCh    chan struct{} // closed on first successful connection
-	connOnce       sync.Once
+	WorkUnitCh      chan *protocol.WorkUnit
+	ModelUpdateCh   chan *protocol.ModelUpdate
+	BinaryUpdateCh  chan *protocol.BinaryUpdate
+	BackendUpdateCh chan *protocol.BackendUpdate
+	done            chan struct{}
+	connectedCh     chan struct{} // closed on first successful connection
+	connOnce        sync.Once
 }
 
 func New(url, workerKey string, id *identity.Identity, model, quantisation, tlsCACert string) *Connection {
@@ -62,17 +64,18 @@ func New(url, workerKey string, id *identity.Identity, model, quantisation, tlsC
 	}
 
 	return &Connection{
-		url:            url,
-		workerKey:      workerKey,
-		identity:       id,
-		model:          model,
-		quantisation:   quantisation,
-		dialer:         dialer,
-		WorkUnitCh:     make(chan *protocol.WorkUnit, 10),
-		ModelUpdateCh:  make(chan *protocol.ModelUpdate, 5),
-		BinaryUpdateCh: make(chan *protocol.BinaryUpdate, 1),
-		done:           make(chan struct{}),
-		connectedCh:    make(chan struct{}),
+		url:             url,
+		workerKey:       workerKey,
+		identity:        id,
+		model:           model,
+		quantisation:    quantisation,
+		dialer:          dialer,
+		WorkUnitCh:      make(chan *protocol.WorkUnit, 10),
+		ModelUpdateCh:   make(chan *protocol.ModelUpdate, 5),
+		BinaryUpdateCh:  make(chan *protocol.BinaryUpdate, 1),
+		BackendUpdateCh: make(chan *protocol.BackendUpdate, 1),
+		done:            make(chan struct{}),
+		connectedCh:     make(chan struct{}),
 	}
 }
 
@@ -128,6 +131,9 @@ func (c *Connection) connect(ctx context.Context) error {
 	c.mu.Lock()
 	if c.llmHash != "" {
 		headers.Set("X-Worker-LLM-Hash", c.llmHash)
+	}
+	if c.backendHash != "" {
+		headers.Set("X-Worker-Backend-Hash", c.backendHash)
 	}
 	c.mu.Unlock()
 
@@ -214,6 +220,18 @@ func (c *Connection) readLoop(ctx context.Context) error {
 				Msg("received binary update from manager")
 			c.BinaryUpdateCh <- &bu
 
+		case protocol.TypeBackendUpdate:
+			var bu protocol.BackendUpdate
+			if err := json.Unmarshal(message, &bu); err != nil {
+				log.Warn().Err(err).Msg("invalid backend_update message")
+				continue
+			}
+			log.Info().
+				Str("version", bu.Version).
+				Str("download_url", bu.DownloadURL).
+				Msg("received backend update from manager")
+			c.BackendUpdateCh <- &bu
+
 		case protocol.TypeHeartbeat:
 			// Manager acknowledged our heartbeat, nothing to do
 			log.Debug().Msg("heartbeat ack received")
@@ -278,6 +296,20 @@ func (c *Connection) GetLLMHash() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.llmHash
+}
+
+// SetBackendHash updates the connection's backend binary hash (thread-safe).
+func (c *Connection) SetBackendHash(hash string) {
+	c.mu.Lock()
+	c.backendHash = hash
+	c.mu.Unlock()
+}
+
+// GetBackendHash returns the current backend hash.
+func (c *Connection) GetBackendHash() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.backendHash
 }
 
 // SendLLMHashReport sends an explicit LLM hash report to the cluster manager.

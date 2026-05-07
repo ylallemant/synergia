@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/ylallemant/synergia/internal/client/backend"
 	"github.com/ylallemant/synergia/internal/client/connection"
 	"github.com/ylallemant/synergia/internal/client/gpu"
 	"github.com/ylallemant/synergia/internal/client/identity"
@@ -67,7 +68,9 @@ type Worker struct {
 	reporter       ErrorReporter
 	consent        ConsentChecker
 	updater        *updater.Updater
-	restartFn      func() // called after successful binary update
+	backendMgr     *backend.Manager
+	restartFn      func()       // called after successful binary update
+	backendRestart func() error // called after backend update (restart llama-server)
 	role           string
 	modelsDir      string
 	managerHTTPURL string
@@ -102,6 +105,13 @@ func (w *Worker) SetUpdater(u *updater.Updater, restartFn func()) {
 	w.restartFn = restartFn
 }
 
+// SetBackendManager configures the backend binary manager.
+// backendRestart is called after a successful backend update (should restart llama-server).
+func (w *Worker) SetBackendManager(mgr *backend.Manager, backendRestart func() error) {
+	w.backendMgr = mgr
+	w.backendRestart = backendRestart
+}
+
 // Run starts the work processing loop. Blocks until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
 	log.Info().Msg("worker processing loop started")
@@ -120,6 +130,9 @@ func (w *Worker) Run(ctx context.Context) {
 
 		case bu := <-w.conn.BinaryUpdateCh:
 			w.handleBinaryUpdate(bu)
+
+		case bu := <-w.conn.BackendUpdateCh:
+			w.handleBackendUpdate(bu)
 
 		case change := <-w.monitor.StateChangeCh:
 			w.handleStateChange(change)
@@ -476,6 +489,50 @@ func (w *Worker) handleBinaryUpdate(bu *protocol.BinaryUpdate) {
 		log.Info().Msg("binary replaced — triggering restart")
 		w.restartFn()
 		return
+	}
+
+	_ = w.conn.SendStatus("available")
+}
+
+func (w *Worker) handleBackendUpdate(bu *protocol.BackendUpdate) {
+	if w.backendMgr == nil {
+		log.Warn().Msg("received backend update but no backend manager configured")
+		return
+	}
+
+	log.Info().
+		Str("version", bu.Version).
+		Msg("received backend update notification")
+
+	if err := w.conn.SendStatus("updating"); err != nil {
+		log.Warn().Err(err).Msg("failed to send updating status")
+	}
+
+	updated, err := w.backendMgr.Apply(bu)
+	if err != nil {
+		log.Error().Err(err).Msg("backend update failed")
+		if w.reporter != nil {
+			w.reporter.Report(err)
+		}
+		_ = w.conn.SendStatus("available")
+		return
+	}
+
+	if updated {
+		// Update the connection's backend hash so the manager knows we're synced
+		w.conn.SetBackendHash(w.backendMgr.Hash())
+
+		// Restart llama-server with the new binary
+		if w.backendRestart != nil {
+			if err := w.backendRestart(); err != nil {
+				log.Error().Err(err).Msg("failed to restart backend after update")
+				if w.reporter != nil {
+					w.reporter.Report(err)
+				}
+			} else {
+				log.Info().Msg("backend restarted with new binary")
+			}
+		}
 	}
 
 	_ = w.conn.SendStatus("available")

@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/ylallemant/synergia/internal/manager/api"
+	"github.com/ylallemant/synergia/internal/manager/cache"
 	"github.com/ylallemant/synergia/internal/manager/config"
 	"github.com/ylallemant/synergia/internal/manager/gateway"
 	"github.com/ylallemant/synergia/internal/manager/latency"
@@ -94,6 +95,11 @@ func main() {
 		}
 	}
 
+	// Always ensure the tester role exists (allows any hardware to participate)
+	if err := db.SeedTesterRole(); err != nil {
+		log.Fatal().Err(err).Msg("failed to seed tester role")
+	}
+
 	q := queue.New()
 	gw := gateway.New(cfg.WorkerKey, q, db)
 	completions := api.NewCompletionsHandler(cfg.APIKey, gw, q, db, cfg.Timeout)
@@ -137,7 +143,9 @@ func main() {
 	rolesAPI.SetGateway(gw)
 	rolesAPI.SetModelStore(modelStore)
 	errorsAPI := api.NewErrorsAPI(cfg.WorkerKey, db)
-	versionAPI := api.NewVersionAPI(cfg.APIKey, db, gw)
+	adminCache := cache.New(db)
+	versionAPI := api.NewVersionAPI(cfg.APIKey, db, gw, adminCache)
+	backendAPI := api.NewBackendAPI(cfg.APIKey, cfg.WorkerKey, db, gw, filepath.Join(cfg.CacheDir, "backend"), adminCache)
 
 	// Initialize latency monitor
 	latencyMonitor := latency.New(db, cfg.LatencyBuckets, cfg.LatencyWindowHours)
@@ -177,7 +185,14 @@ func main() {
 
 	// Client version management API
 	mux.HandleFunc("/v1/admin/version", versionAPI.AdminVersionHandler)
+	mux.HandleFunc("/v1/admin/version/tags", versionAPI.AdminVersionTagsHandler)
 	mux.HandleFunc("/v1/binary/download", versionAPI.BinaryDownloadHandler)
+
+	// Backend (llama-server) version management API
+	mux.HandleFunc("/v1/admin/backend", backendAPI.AdminBackendHandler)
+	mux.HandleFunc("/v1/admin/backend/tags", backendAPI.AdminBackendTagsHandler)
+	mux.HandleFunc("/v1/admin/backend/names", backendAPI.AdminBackendNamesHandler)
+	mux.HandleFunc("/v1/backend/download", backendAPI.BackendDownloadHandler)
 
 	// Model download API (authenticated with worker key)
 	mux.HandleFunc("/v1/models/files", modelsAPI.ListModelsHandler)
@@ -214,9 +229,15 @@ func main() {
 	}
 
 	// Administration server (separate port)
-	adminServer := adminsrv.New(cfg.AdminAddr, cfg.APIKey, cfg.WorkerKey, db, cfg.Insecure, cfg.TLSCertFile, cfg.TLSKeyFile)
+	adminServer := adminsrv.New(cfg.AdminAddr, cfg.APIKey, cfg.WorkerKey, db, adminCache, cfg.Insecure, cfg.TLSCertFile, cfg.TLSKeyFile)
 	adminServer.HandleFunc("/v1/latency", latencyAPI.LatencyHandler)
 	adminServer.HandleFunc("/v1/latency/config", latencyAPI.ConfigHandler)
+	adminServer.HandleFunc("/v1/admin/version", versionAPI.AdminVersionHandler)
+	adminServer.HandleFunc("/v1/admin/version/tags", versionAPI.AdminVersionTagsHandler)
+	adminServer.HandleFunc("/v1/admin/backend", backendAPI.AdminBackendHandler)
+	adminServer.HandleFunc("/v1/admin/backend/tags", backendAPI.AdminBackendTagsHandler)
+	adminServer.HandleFunc("/v1/admin/backend/names", backendAPI.AdminBackendNamesHandler)
+	adminServer.HandleFunc("/v1/admin/roles", rolesAPI.AdminRolesHandler)
 
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -260,6 +281,7 @@ func main() {
 	}()
 
 	go adminServer.Run(ctx)
+	adminCache.Start(ctx)
 
 	<-ctx.Done()
 	log.Info().Msg("shutting down...")

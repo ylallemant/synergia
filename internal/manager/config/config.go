@@ -37,6 +37,9 @@ type Config struct {
 	// Administration
 	AdminAddr string // Separate listener for admin-only endpoints
 
+	// Cache
+	CacheDir string // Directory for cached downloads (backend binaries, etc.)
+
 	// Latency monitoring
 	LatencyBuckets     int // Number of payload-size buckets for the latency matrix
 	LatencyWindowHours int // Rolling window in hours for sample retention
@@ -63,6 +66,7 @@ func Load() (*Config, error) {
 		ModelS3Secret:      os.Getenv("CLUSTER_MODEL_S3_SECRET"),
 		ModelS3SSL:         envOrDefault("CLUSTER_MODEL_S3_SSL", "true") == "true",
 		AdminAddr:          envOrDefault("CLUSTER_ADMIN_ADDR", ":7501"),
+		CacheDir:           envOrDefault("CLUSTER_CACHE_DIR", "./cache"),
 		LatencyBuckets:     envOrDefaultInt("CLUSTER_LATENCY_BUCKETS", 4),
 		LatencyWindowHours: envOrDefaultInt("CLUSTER_LATENCY_WINDOW_HOURS", 48),
 	}

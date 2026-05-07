@@ -79,6 +79,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	quantisation := r.Header.Get("X-Worker-Quantisation")
 	clientVersion := r.Header.Get("X-Worker-Version")
 	llmHash := r.Header.Get("X-Worker-LLM-Hash")
+	backendHash := r.Header.Get("X-Worker-Backend-Hash")
 	workerOS := r.Header.Get("X-Worker-OS")
 	workerArch := r.Header.Get("X-Worker-Arch")
 
@@ -155,6 +156,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			g.store.UpdateWorkerSyncStatus(fingerprint)
 		}
+		if backendHash != "" {
+			if err := g.store.SetWorkerBackendHash(fingerprint, backendHash); err != nil {
+				log.Error().Err(err).Msg("failed to persist worker backend hash")
+			}
+			g.store.UpdateWorkerBackendSyncStatus(fingerprint)
+		}
 		g.store.SetWorkerOnlineIfAllowed(fingerprint)
 	}
 
@@ -162,6 +169,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Str("model", model).
 		Str("quantisation", quantisation).
 		Str("llm_hash", llmHash).
+		Str("backend_hash", backendHash).
 		Str("fingerprint", fingerprint).
 		Msg("worker connected")
 
@@ -462,6 +470,32 @@ func (g *Gateway) PushBinaryUpdate(version, downloadURL, fallbackURL, sha256 str
 		Str("version", version).
 		Str("fingerprint", wc.info.Fingerprint).
 		Msg("pushing binary update to worker")
+
+	return wc.conn.WriteJSON(update)
+}
+
+// PushBackendUpdate sends a backend update notification to the connected worker.
+func (g *Gateway) PushBackendUpdate(version, downloadURL, fallbackURL, sha256 string) error {
+	g.mu.RLock()
+	wc := g.worker
+	g.mu.RUnlock()
+
+	if wc == nil {
+		return fmt.Errorf("no worker connected")
+	}
+
+	update := &protocol.BackendUpdate{
+		Type:        protocol.TypeBackendUpdate,
+		Version:     version,
+		DownloadURL: downloadURL,
+		FallbackURL: fallbackURL,
+		SHA256:      sha256,
+	}
+
+	log.Info().
+		Str("version", version).
+		Str("fingerprint", wc.info.Fingerprint).
+		Msg("pushing backend update to worker")
 
 	return wc.conn.WriteJSON(update)
 }

@@ -18,7 +18,7 @@ Minimal implementation: single worker, no trust system, no redundancy. The goal 
 - Configuration via environment variables
 - **Worker consent API** (`/v1/consent`): gate work unit dispatch on accepted data collection consent
 - **Worker config API** (`/v1/worker-config`): store and retrieve worker preferred role
-- **Role-model mapping** (`/v1/roles`, `/v1/admin/roles`): manager-controlled mapping of roles to LLM models with VRAM eligibility thresholds
+- **Role-model mapping** (`/v1/roles`, `/v1/admin/roles`): manager-controlled mapping of roles to LLM models with VRAM eligibility thresholds; the `tester` role is always present and always eligible regardless of hardware
 - **Branding API** (`/v1/branding/style.css`, `/v1/admin/branding/css`): customisable CSS served to clients
 - **Model storage** (filesystem + S3 via MinIO): model file listing and download with Range support
 - **Synergia API** (`/v1/workers`, `/v1/work-units`, `/v1/stats`): cluster management endpoints
@@ -28,7 +28,8 @@ Minimal implementation: single worker, no trust system, no redundancy. The goal 
 - **Development mode** (`--development`): batch requests are processed sequentially with random 1-5s delays between each, making it easier to observe and debug the queue lifecycle
 - **429 rejection**: live `/v1/chat/completions` returns HTTP 429 when no worker is in `available` state (paused, idle, or processing); callers should retry or use the batch endpoint
 - **Administration port**: separate listener for admin-only endpoints (dashboard, latency, config), enabling k8s service/ingress segregation
-- **Admin dashboard**: auto-refreshing HTML page on the admin port showing connected workers, role distribution, today's payloads, and recent client errors
+- **In-memory cache** (`internal/manager/cache/`): background-refreshed stats (1 s interval) and GitHub release tags for the admin dashboard; avoids per-request DB queries and GitHub API calls
+- **Admin dashboard**: JS-polled (2 s) HTML page on the admin port showing connected workers, role distribution, today's payloads, and recent client errors
 - **SQLite + PostgreSQL** storage (GORM): worker registry, work unit history, consent, config, client errors, latency samples
 - **TLS** with optional HTTP→HTTPS redirect server
 - **Result signing** received (signature is passed through the protocol but not yet persisted in DB)
@@ -36,7 +37,10 @@ Minimal implementation: single worker, no trust system, no redundancy. The goal 
 - **Dual-status model**: each worker has a `status` (client-reported) and a `sync_status` (manager-derived from LLM hash comparison). Only workers with both `available` + `synced` receive work dispatch
 - **Binary auto-update push**: admin sets target client version via `POST /v1/admin/version`; manager resolves platform-specific download URLs from GitHub releases, computes SHA256 per artifact, pushes `binary_update` to outdated workers. Supports `all` or `percentage`-based rollout modes
 - **Binary download proxy** (`GET /v1/binary/download`): fetches and caches release binaries from GitHub, serves to workers behind firewalls that cannot reach GitHub directly
-- **Admin configuration UI** (`/admin/config` on admin port): unified page showing target client version, role-model matrix, and worker overview (fingerprint, OS/arch, version, sync status)
+- **Backend auto-update push**: admin sets target backend version and name via `POST /v1/admin/backend`; manager resolves download URL from a registry of backend URL templates, pushes `backend_update` to workers. Tags are fetched from GitHub via `/v1/admin/backend/tags`
+- **Backend download proxy** (`GET /v1/backend/download`): fetches and caches full backend release archives from upstream, serves to workers behind firewalls that cannot reach GitHub directly
+- **Backend registry** (`internal/manager/backend/`): central package defining supported backend names (constants), download URL templates with platform/arch placeholders, and GitHub tag retrieval
+- **Admin configuration UI** (`/admin/config` on admin port): unified page showing target client version, backend name/version (with dropdown and refresh), role-model matrix, and worker overview (fingerprint, OS/arch, version, sync status)
 - **Platform-aware worker registry**: stores `os` and `arch` (from `X-Worker-OS`/`X-Worker-Arch` headers) in the workers table for binary artifact resolution
 
 ### Out of Scope (Phase 2+)
@@ -61,6 +65,7 @@ cmd/synergia-manager/ + internal/manager/
     ├── config/
     │   └── config.go                # Env-based configuration
     ├── api/
+    │   ├── backend.go               # Backend version management + download proxy + tags API
     │   ├── batch.go                 # OpenAI-compatible /v1/batches (create, retrieve, list, cancel)
     │   ├── branding.go              # Branding CSS API (served to worker dashboards)
     │   ├── completions.go           # OpenAI-compatible /v1/chat/completions handler
@@ -70,6 +75,8 @@ cmd/synergia-manager/ + internal/manager/
     │   ├── latency.go               # Latency monitoring admin API (GET /v1/latency, config)
     │   ├── models_download.go       # Model file listing + download endpoint
     │   └── roles.go                 # Role-model mapping + eligibility API
+    ├── backend/
+    │   └── backend.go               # Backend registry: names, URL templates, GitHub tag fetching
     ├── gateway/
     │   └── websocket.go             # WebSocket upgrade + worker session management
     ├── latency/
@@ -78,6 +85,9 @@ cmd/synergia-manager/ + internal/manager/
     │   └── store.go                 # Model storage abstraction (filesystem + S3)
     ├── queue/
     │   └── queue.go                 # In-memory work unit queue + dispatch
+    ├── cache/
+    │   ├── cache.go                 # In-memory cache (dashboard stats + tag lists, background refresh)
+    │   └── github.go                # GitHub Releases API client (client + backend tags)
     ├── server/
     │   ├── server.go                # Admin dashboard HTTP server (admin port)
     │   └── static/                  # Embedded HTML template + CSS for admin dashboard
@@ -110,7 +120,7 @@ cmd/synergia-manager/ + internal/manager/
 | `CLUSTER_MODEL_S3_KEY` | (required for s3) | S3 access key |
 | `CLUSTER_MODEL_S3_SECRET` | (required for s3) | S3 secret key |
 | `CLUSTER_MODEL_S3_SSL` | `true` | Use HTTPS for S3 connections |
-| `CLUSTER_TEST_SETUP` | `false` | When `true`, seeds role-model mappings with minimal test thresholds (512 MB VRAM, SmolLM2-135M model) instead of production values |
+| `CLUSTER_TEST_SETUP` | `false` | When `true`, seeds role-model mappings with minimal test thresholds (512 MB VRAM, SmolLM2-135M model) instead of production values. Note: the `tester` role is always seeded regardless of this flag |
 | `CLUSTER_ADMIN_ADDR` | `:7501` | Administration listener address (separate from the main API port) |
 | `CLUSTER_LATENCY_BUCKETS` | `4` | Number of payload-size buckets for the latency matrix |
 | `CLUSTER_LATENCY_WINDOW_HOURS` | `48` | Rolling window (in hours) for payload statistics and sample retention |
@@ -319,7 +329,7 @@ This is useful when the live endpoint returns 429 (all workers busy/paused). Ins
 | `POST` | `/v1/consent` | Accept or revoke data collection consent |
 | `GET` | `/v1/worker-config` | Get configuration preferences for the authenticated worker |
 | `POST` | `/v1/worker-config` | Store preferred role (requires prior consent) |
-| `GET` | `/v1/roles?fingerprint=<fp>` | List all roles with eligibility computed from worker VRAM |
+| `GET` | `/v1/roles?fingerprint=<fp>` | List all roles with eligibility computed from worker VRAM (tester is always eligible) |
 
 ### Role Administration Endpoints (authenticated with API key)
 
@@ -353,6 +363,29 @@ Workers authenticate model download requests with `Authorization: Bearer <CLUSTE
 ## Administration API (port 7501)
 
 Served on the dedicated admin listener. Authenticated with `CLUSTER_API_KEY`.
+
+### Backend Administration Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/admin/backend` | Get current backend version config (name, version, download URL) |
+| `POST` | `/v1/admin/backend` | Set target backend version — pushes `backend_update` to workers |
+| `GET` | `/v1/admin/backend/tags?name=llama.cpp&limit=20` | Fetch recent release tags from GitHub for the named backend |
+| `GET` | `/v1/admin/backend/names` | List all supported backend names |
+| `GET` | `/v1/backend/download?version=b9049&os=darwin&arch=arm64` | Backend download proxy (worker-authenticated) — caches and serves full release archives |
+
+#### POST /v1/admin/backend
+
+```json
+{
+  "name": "llama.cpp",
+  "version": "b9049"
+}
+```
+
+The `download_url` field is optional — if omitted, the manager resolves it from the backend's URL template using the version and the worker's OS/arch. If provided explicitly, it overrides the template.
+
+The response includes the resolved configuration and a `fallback_url` for each connected worker.
 
 ### Latency Monitoring Endpoints
 

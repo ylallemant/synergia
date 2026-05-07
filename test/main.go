@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -109,6 +110,18 @@ func (lb *logBuffer) Contains(substr string) bool {
 	return false
 }
 
+func (lb *logBuffer) CountContains(substr string) int {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	count := 0
+	for _, line := range lb.lines {
+		if strings.Contains(line, substr) {
+			count++
+		}
+	}
+	return count
+}
+
 func (lb *logBuffer) Dump(w io.Writer) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
@@ -119,10 +132,19 @@ func (lb *logBuffer) Dump(w io.Writer) {
 
 func main() {
 	keepAlive := false
+	runOnly := false
 	for _, arg := range os.Args[1:] {
 		if arg == "--keep-alive" || arg == "-keep-alive" {
 			keepAlive = true
 		}
+		if arg == "--run" || arg == "-run" {
+			runOnly = true
+		}
+	}
+
+	if runOnly {
+		runServices()
+		return
 	}
 
 	initLogger()
@@ -472,16 +494,16 @@ func main() {
 		}
 		pass("Manager received 'updating' status from worker")
 
-		// 12c4: Verify manager logged aggregated status transition (updating → unavailable)
+		// 12c4: Verify manager logged aggregated status transition during update
 		if err := waitForLog(managerLogs, "client_status=updating", 5*time.Second); err != nil {
 			managerLogs.Dump(os.Stderr)
 			fatal("manager did not log status transition for 'updating': %v", err)
 		}
-		if err := waitForLog(managerLogs, "aggregated=unavailable", 5*time.Second); err != nil {
+		if err := waitForLog(managerLogs, "aggregated=updating", 5*time.Second); err != nil {
 			managerLogs.Dump(os.Stderr)
-			fatal("manager did not log aggregated=unavailable during update: %v", err)
+			fatal("manager did not log aggregated=updating during update: %v", err)
 		}
-		pass("Manager logged status transition: client_status=updating aggregated=unavailable")
+		pass("Manager logged status transition: client_status=updating aggregated=updating")
 
 		// 12d: Wait for the client to download the model, hash it, and report
 		if err := waitForLog(clientLogs, "model file verified", 60*time.Second); err != nil {
@@ -925,8 +947,83 @@ func main() {
 		}
 	}
 
-	// --- Step 21: Collect output ---
-	step("21. Collecting output")
+	// --- Step 21: Backend admin API (real llama.cpp download) ---
+	// Skip in keep-alive mode: downloads ~16MB from GitHub per run
+	if !keepAlive {
+		step("21. Testing backend admin API with real llama.cpp release")
+		{
+			// Use the real llama.cpp release URL template
+			// First: set backend version b9049 (triggers real download)
+			backendPayload1 := `{"name":"llama.cpp","version":"b9049","sha256":""}`
+			backendReq1, _ := http.NewRequest(http.MethodPost, "https://"+managerAddr+"/v1/admin/backend", bytes.NewBufferString(backendPayload1))
+			backendReq1.Header.Set("Authorization", "Bearer "+apiKey)
+			backendReq1.Header.Set("Content-Type", "application/json")
+			backendResp1, err := http.DefaultClient.Do(backendReq1)
+			if err != nil {
+				fatal("backend POST b9049 failed: %v", err)
+			}
+			backendResp1.Body.Close()
+			if backendResp1.StatusCode != http.StatusOK {
+				fatal("backend POST b9049 returned %d", backendResp1.StatusCode)
+			}
+			pass("POST /v1/admin/backend → b9049")
+
+			// Wait for the client to process the backend update
+			if err := waitForLog(clientLogs, "backend binary updated successfully", 120*time.Second); err != nil {
+				// Check if it was received at all
+				if err2 := waitForLog(clientLogs, "backend update", 5*time.Second); err2 != nil {
+					fatal("backend_update not received by client: %v", err)
+				}
+				fatal("backend download/install failed (check client logs): %v", err)
+			}
+			pass("Client downloaded and installed llama-server b9049")
+
+			// Verify the installed binary works
+			backendBin := filepath.Join(dataDir, "client-data", "backend", "llama-server")
+			if runtime.GOOS == "windows" {
+				backendBin += ".exe"
+			}
+			versionOut, err := exec.Command(backendBin, "--version").CombinedOutput()
+			if err != nil {
+				fatal("backend binary verification failed: %v (output: %s)", err, string(versionOut))
+			}
+			pass("Backend binary verified: %s", strings.TrimSpace(string(versionOut)))
+
+			// GET the config back
+			backendGetResp, err := apiGet("https://"+managerAddr+"/v1/admin/backend", apiKey)
+			if err != nil {
+				fatal("backend GET failed: %v", err)
+			}
+			if !strings.Contains(backendGetResp, "b9049") {
+				fatal("backend GET did not return expected version: %s", backendGetResp)
+			}
+			pass("GET /v1/admin/backend → version=b9049")
+
+			// Second: upgrade to b9050 (triggers real update)
+			backendPayload2 := `{"name":"llama.cpp","version":"b9050","sha256":""}`
+			backendReq2, _ := http.NewRequest(http.MethodPost, "https://"+managerAddr+"/v1/admin/backend", bytes.NewBufferString(backendPayload2))
+			backendReq2.Header.Set("Authorization", "Bearer "+apiKey)
+			backendReq2.Header.Set("Content-Type", "application/json")
+			backendResp2, err := http.DefaultClient.Do(backendReq2)
+			if err != nil {
+				fatal("backend POST b9050 failed: %v", err)
+			}
+			backendResp2.Body.Close()
+			if backendResp2.StatusCode != http.StatusOK {
+				fatal("backend POST b9050 returned %d", backendResp2.StatusCode)
+			}
+			pass("POST /v1/admin/backend → b9050 (upgrade)")
+
+			// Wait for the client to process the update
+			if err := waitForLogN(clientLogs, "backend binary updated successfully", 2, 120*time.Second); err != nil {
+				fatal("backend upgrade to b9050 failed: %v", err)
+			}
+			pass("Client upgraded backend to b9050")
+		}
+	}
+
+	// --- Step 22: Collect output ---
+	step("22. Collecting output")
 	writeOutput(filepath.Join(dataDir, "completion-response.json"), []byte(completionResp))
 	writeOutput(filepath.Join(dataDir, "stats.json"), []byte(statsResp))
 	writeOutput(filepath.Join(dataDir, "workers.json"), []byte(workersResp))
@@ -1202,6 +1299,18 @@ func waitForLog(lb *logBuffer, substr string, timeout time.Duration) error {
 		time.Sleep(300 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout waiting for log containing %q", substr)
+}
+
+// waitForLogN waits until the substring appears at least n times in the log.
+func waitForLogN(lb *logBuffer, substr string, n int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if lb.CountContains(substr) >= n {
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for %d occurrences of %q (got %d)", n, substr, lb.CountContains(substr))
 }
 
 func apiGet(url, key string) (string, error) {
@@ -1555,4 +1664,255 @@ func querySQLiteString(dbPath, query string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
+}
+
+// runServices starts llama-server, cluster-manager, and cluster-client in
+// development mode without running any tests. If any process exits, the
+// others are stopped.
+func runServices() {
+	initLogger()
+
+	log.Info().Msg("=== Synergia Run Mode (no tests) ===")
+
+	testDir, err := os.Getwd()
+	if err != nil {
+		fatal("get working dir: %v", err)
+	}
+	repoRoot := filepath.Join(testDir, "..")
+	modelsDir := filepath.Join(testDir, "testdata", "models")
+	runDir := filepath.Join(testDir, "runs", time.Now().Format("2006-01-02_15-04-05"))
+	dataDir := filepath.Join(runDir, "data")
+	logDir := filepath.Join(runDir, "logs")
+
+	for _, d := range []string{modelsDir, dataDir, logDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			fatal("create dir %s: %v", d, err)
+		}
+	}
+
+	cleanupOldRuns(filepath.Join(testDir, "runs"), 3)
+
+	// TLS certs
+	tlsDir := filepath.Join(testDir, "testdata", "tls")
+	caCertPath, serverCertPath, serverKeyPath, err := ensureTLSCerts(tlsDir)
+	if err != nil {
+		fatal("TLS cert generation: %v", err)
+	}
+
+	// Trust the test CA
+	caCertPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		fatal("read CA cert: %v", err)
+	}
+	caPool, err := x509.SystemCertPool()
+	if err != nil {
+		caPool = x509.NewCertPool()
+	}
+	if !caPool.AppendCertsFromPEM(caCertPEM) {
+		fatal("failed to parse CA certificate")
+	}
+	http.DefaultTransport = &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: caPool},
+	}
+
+	// Ensure model
+	modelPath := filepath.Join(modelsDir, testModelFilename)
+	if err := ensureModel(modelPath); err != nil {
+		fatal("model download: %v", err)
+	}
+
+	// Find llama-server
+	llamaServerBin, err := exec.LookPath("llama-server")
+	if err != nil {
+		fatal("llama-server not found in PATH")
+	}
+
+	// --- Start llama-server ---
+	llamaLogs := newLogBuffer("llama-server", logDir)
+	defer llamaLogs.Close()
+	llamaCmd := exec.Command(llamaServerBin,
+		"--model", modelPath,
+		"--port", llamaServerPort,
+		"--ctx-size", "2048",
+		"--n-gpu-layers", "99",
+	)
+	llamaCmd.Stdout = llamaLogs
+	llamaCmd.Stderr = llamaLogs
+	if err := llamaCmd.Start(); err != nil {
+		fatal("start llama-server: %v", err)
+	}
+
+	if err := waitForHTTP("http://127.0.0.1:"+llamaServerPort+"/health", 30*time.Second); err != nil {
+		llamaLogs.Dump(os.Stderr)
+		fatal("llama-server did not become ready: %v", err)
+	}
+	log.Info().Str("port", llamaServerPort).Msg("llama-server ready")
+
+	// --- Start cluster-manager ---
+	managerLogs := newLogBuffer("cluster-manager", logDir)
+	defer managerLogs.Close()
+	managerCmd := exec.Command("go", "run", "./cmd/synergia-manager", "--development")
+	managerCmd.Dir = repoRoot
+	managerCmd.Env = append(os.Environ(),
+		"CLUSTER_LISTEN_ADDR="+managerAddr,
+		"CLUSTER_API_KEY="+apiKey,
+		"CLUSTER_WORKER_KEY="+workerKey,
+		"CLUSTER_MODEL_BACKEND=filesystem",
+		"CLUSTER_MODEL_PATH="+modelsDir,
+		"CLUSTER_DB_PATH="+filepath.Join(dataDir, "cluster-manager.db"),
+		"CLUSTER_TEST_SETUP=true",
+		"CLUSTER_ADMIN_ADDR="+managerAdminAddr,
+		"TLS_CERT_FILE="+serverCertPath,
+		"TLS_KEY_FILE="+serverKeyPath,
+		"CLUSTER_HTTP_REDIRECT_ADDR="+managerRedirectAddr,
+		"LOG_LEVEL=debug",
+	)
+	managerCmd.Stdout = managerLogs
+	managerCmd.Stderr = managerLogs
+	if err := managerCmd.Start(); err != nil {
+		fatal("start cluster-manager: %v", err)
+	}
+
+	if err := waitForHTTP("https://"+managerAddr+"/healthz", 30*time.Second); err != nil {
+		managerLogs.Dump(os.Stderr)
+		fatal("cluster-manager did not become ready: %v", err)
+	}
+	log.Info().Str("addr", managerAddr).Msg("cluster-manager ready")
+
+	// --- Start cluster-client ---
+	clientDataDir := filepath.Join(dataDir, "client-data")
+	clientLogs := newLogBuffer("cluster-client", logDir)
+	defer clientLogs.Close()
+	clientCmd := exec.Command("go", "run", "./cmd/synergia-client",
+		"--manager-url", "wss://"+managerAddr+"/ws/worker",
+		"--worker-key", workerKey,
+		"--llm-url", "http://127.0.0.1:"+llamaServerPort,
+		"--model", testModelName,
+		"--quantisation", testQuantisation,
+		"--role", "tester",
+		"--model-file", modelPath,
+		"--data-dir", clientDataDir,
+		"--auto-approve",
+		"--tls-ca-cert", caCertPath,
+	)
+	clientCmd.Dir = repoRoot
+	clientCmd.Env = append(os.Environ(), "LOG_LEVEL=debug")
+	clientCmd.Stdout = clientLogs
+	clientCmd.Stderr = clientLogs
+	if err := clientCmd.Start(); err != nil {
+		fatal("start cluster-client: %v", err)
+	}
+
+	log.Info().Msg("")
+	log.Info().Msg("All services started in development mode (no tests)")
+	log.Info().Msgf("  Client Dashboard: http://127.0.0.1:9876/static/index.html")
+	log.Info().Msgf("  Admin Dashboard:  https://%s/?key=%s", managerAdminAddr, apiKey)
+	log.Info().Msgf("  Manager API:      https://%s", managerAddr)
+	log.Info().Msg("  Press Ctrl+C or use tray → Quit to stop")
+	log.Info().Msg("")
+
+	// Wait for client to register before sending payloads
+	if err := waitForHTTP("https://"+managerAddr+"/healthz", 10*time.Second); err != nil {
+		log.Warn().Msg("manager health check failed, payloads may not work")
+	}
+	time.Sleep(3 * time.Second) // give client time to connect
+
+	// Background payload sender
+	stop := make(chan struct{})
+	go func() {
+		messages := []string{
+			"What is 2+2? Reply with just the number.",
+			"Summarize the following text in one sentence: " + strings.Repeat("The quick brown fox jumps over the lazy dog. ", 20),
+			"Explain the key themes in this essay: " + strings.Repeat("Artificial intelligence is transforming the way we approach complex problems in science, medicine, and engineering. ", 40),
+			"Write a haiku about programming.",
+			"List the first 5 prime numbers.",
+			"Translate 'hello world' into French, German, and Japanese. " + strings.Repeat("Provide context and etymology for each translation. ", 15),
+		}
+		var count int64
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			msg := messages[rand.Intn(len(messages))]
+			_, err := sendCompletionWithMessage("https://"+managerAddr+"/v1/chat/completions", apiKey, testModelName, msg)
+			if err != nil {
+				log.Warn().Err(err).Msg("payload failed")
+			} else {
+				count++
+				if count%10 == 0 {
+					log.Info().Int64("count", count).Msg("payloads sent")
+				}
+			}
+			delay := time.Duration(1000+rand.Intn(3000)) * time.Millisecond
+			select {
+			case <-stop:
+				return
+			case <-time.After(delay):
+			}
+		}
+	}()
+
+	// Background batch request sender
+	go func() {
+		batchMessages := []string{
+			"What is the speed of light?",
+			"Name three planets in our solar system.",
+			"What year did the French Revolution start?",
+			"Define the word 'ephemeral'.",
+			"What is the square root of 144?",
+		}
+		for {
+			delay := time.Duration(10+rand.Intn(11)) * time.Second
+			select {
+			case <-stop:
+				return
+			case <-time.After(delay):
+			}
+			count := 1 + rand.Intn(5)
+			for i := 0; i < count; i++ {
+				msg := batchMessages[rand.Intn(len(batchMessages))]
+				_, err := submitBatchRequest("https://"+managerAddr+"/v1/batches", apiKey, testModelName, msg)
+				if err != nil {
+					log.Warn().Err(err).Msg("batch submit failed")
+				}
+			}
+			log.Info().Int("submitted", count).Msg("batch requests sent")
+		}
+	}()
+
+	// Monitor lifecycle
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+	clientDone := make(chan struct{})
+	go func() { clientCmd.Wait(); close(clientDone) }()
+
+	managerDone := make(chan struct{})
+	go func() { managerCmd.Wait(); close(managerDone) }()
+
+	llamaDone := make(chan struct{})
+	go func() { llamaCmd.Wait(); close(llamaDone) }()
+
+	select {
+	case <-sigCh:
+		log.Info().Msg("signal received, shutting down gracefully...")
+	case <-clientDone:
+		log.Info().Msg("client exited, shutting down...")
+	case <-managerDone:
+		log.Info().Msg("manager exited, shutting down...")
+	case <-llamaDone:
+		log.Info().Msg("llama-server exited, shutting down...")
+	}
+
+	close(stop)
+
+	// Graceful shutdown: stop each service in order
+	cleanup("cluster-client", clientCmd)
+	cleanup("cluster-manager", managerCmd)
+	cleanup("llama-server", llamaCmd)
+
+	log.Info().Msg("all services stopped")
+	os.Exit(0)
 }

@@ -41,7 +41,7 @@ func OpenPostgres(dsn string) (*Store, error) {
 }
 
 func migrate(db *gorm.DB, driver, info string) (*Store, error) {
-	if err := db.AutoMigrate(&Worker{}, &WorkUnit{}, &WorkerConsent{}, &WorkerConfig{}, &BrandingConfig{}, &RoleModel{}, &ClientError{}, &BatchRequest{}, &LatencySample{}, &LatencyHourlyStat{}, &ClientVersionConfig{}); err != nil {
+	if err := db.AutoMigrate(&Worker{}, &WorkUnit{}, &WorkerConsent{}, &WorkerConfig{}, &BrandingConfig{}, &RoleModel{}, &ClientError{}, &BatchRequest{}, &LatencySample{}, &LatencyHourlyStat{}, &ClientVersionConfig{}, &BackendVersionConfig{}); err != nil {
 		return nil, fmt.Errorf("migration failed: %w", err)
 	}
 
@@ -333,6 +333,11 @@ func (s *Store) UpsertRoleModel(role, model, quantisation, modelFilename, modelF
 	}).Error
 }
 
+// DeleteRoleModel removes a role-model mapping by role name.
+func (s *Store) DeleteRoleModel(role string) error {
+	return s.DB.Where("role = ?", role).Delete(&RoleModel{}).Error
+}
+
 // SeedTestRoles populates role-model mappings suitable for integration testing
 // (tiny model, minimal VRAM requirement).
 func (s *Store) SeedTestRoles() error {
@@ -340,6 +345,7 @@ func (s *Store) SeedTestRoles() error {
 		{Role: "embedding", LLMModel: "SmolLM2-135M-Instruct", Quantisation: "Q4_K_M", ModelFilename: "SmolLM2-135M-Instruct-Q4_K_M.gguf", MinVRAMMB: 512, Description: "Vector embeddings (test mode — minimal model)"},
 		{Role: "inference", LLMModel: "SmolLM2-135M-Instruct", Quantisation: "Q4_K_M", ModelFilename: "SmolLM2-135M-Instruct-Q4_K_M.gguf", MinVRAMMB: 512, Description: "Query inference (test mode — minimal model)"},
 		{Role: "ingestion", LLMModel: "SmolLM2-135M-Instruct", Quantisation: "Q4_K_M", ModelFilename: "SmolLM2-135M-Instruct-Q4_K_M.gguf", MinVRAMMB: 512, Description: "Document ingestion (test mode — minimal model)"},
+		{Role: "tester", LLMModel: "SmolLM2-135M-Instruct", Quantisation: "Q4_K_M", ModelFilename: "SmolLM2-135M-Instruct-Q4_K_M.gguf", MinVRAMMB: 512, Description: "Connectivity testing — minimal model for any hardware"},
 	}
 	for _, r := range testRoles {
 		if err := s.UpsertRoleModel(r.Role, r.LLMModel, r.Quantisation, r.ModelFilename, r.ModelFileHash, r.MinVRAMMB, r.Description); err != nil {
@@ -356,6 +362,7 @@ func (s *Store) SeedProductionRoles() error {
 		{Role: "embedding", LLMModel: "bge-m3", Quantisation: "Q4_K_M", ModelFilename: "bge-m3-Q4_K_M.gguf", MinVRAMMB: 4096, Description: "Vector embeddings (bge-m3, ~2 GB model + KV cache)"},
 		{Role: "inference", LLMModel: "mistral-nemo-12b-instruct", Quantisation: "Q4_K_M", ModelFilename: "mistral-nemo-12b-instruct-Q4_K_M.gguf", MinVRAMMB: 10240, Description: "Query inference (Mistral Nemo 12B, ~7 GB model + KV cache)"},
 		{Role: "ingestion", LLMModel: "mistral-small-3.1-24b-instruct", Quantisation: "Q4_K_M", ModelFilename: "mistral-small-3.1-24b-instruct-Q4_K_M.gguf", MinVRAMMB: 20480, Description: "Document ingestion (Mistral Small 3.1 24B, ~14 GB model + KV cache)"},
+		{Role: "tester", LLMModel: "SmolLM2-135M-Instruct", Quantisation: "Q4_K_M", ModelFilename: "SmolLM2-135M-Instruct-Q4_K_M.gguf", MinVRAMMB: 512, Description: "Connectivity testing — minimal model for any hardware"},
 	}
 	for _, r := range prodRoles {
 		if err := s.UpsertRoleModel(r.Role, r.LLMModel, r.Quantisation, r.ModelFilename, r.ModelFileHash, r.MinVRAMMB, r.Description); err != nil {
@@ -363,6 +370,12 @@ func (s *Store) SeedProductionRoles() error {
 		}
 	}
 	return nil
+}
+
+// SeedTesterRole ensures the tester role always exists, regardless of mode.
+// This allows any hardware to participate in the cluster.
+func (s *Store) SeedTesterRole() error {
+	return s.UpsertRoleModel("tester", "SmolLM2-135M-Instruct", "Q4_K_M", "SmolLM2-135M-Instruct-Q4_K_M.gguf", "", 512, "Connectivity testing — minimal model for any hardware")
 }
 
 // GetBrandingCSS returns the stored custom CSS, or empty string if none.
@@ -695,31 +708,68 @@ func (s *Store) UpdateWorkerSyncStatus(fingerprint string) string {
 	return "out-of-sync"
 }
 
-// GetWorkerSyncStatus returns the current sync_status for a worker.
+// GetWorkerSyncStatus returns the overall combined sync status for a worker.
 func (s *Store) GetWorkerSyncStatus(fingerprint string) string {
-	var worker Worker
-	if err := s.DB.Select("sync_status").Where("fingerprint = ?", fingerprint).First(&worker).Error; err != nil {
-		return "out-of-sync"
-	}
-	if worker.SyncStatus == "" {
-		return "out-of-sync"
-	}
-	return worker.SyncStatus
+	return s.GetWorkerOverallSyncStatus(fingerprint)
 }
 
-// AggregatedStatus computes the aggregated status from client_status and sync_status.
-// Only "available" + "synced" = "available". Everything else = "unavailable".
+// AggregatedStatus computes the aggregated status from client_status and sync statuses.
+// A worker is "available" only when status=available AND all syncs are "synced".
+// A worker in "updating" status stays "updating" regardless of sync state.
 func AggregatedStatus(clientStatus, syncStatus string) string {
-	if clientStatus == "available" && syncStatus == "synced" {
-		return "available"
+	if clientStatus == "updating" {
+		return "updating"
 	}
 	if clientStatus == "offline" {
 		return "offline"
+	}
+	if clientStatus == "available" && syncStatus == "synced" {
+		return "available"
 	}
 	if clientStatus == "processing" && syncStatus == "synced" {
 		return "processing"
 	}
 	return "unavailable"
+}
+
+// ComputeOverallSyncStatus combines model, binary, and backend sync into one.
+func ComputeOverallSyncStatus(modelSync, binarySync, backendSync string) string {
+	if modelSync == "synced" && binarySync == "synced" && backendSync == "synced" {
+		return "synced"
+	}
+	return "out-of-sync"
+}
+
+// GetWorkerOverallSyncStatus computes the combined sync status for a worker.
+func (s *Store) GetWorkerOverallSyncStatus(fingerprint string) string {
+	var worker Worker
+	if err := s.DB.Select("sync_status, binary_sync_status, backend_sync_status").Where("fingerprint = ?", fingerprint).First(&worker).Error; err != nil {
+		return "out-of-sync"
+	}
+	modelSync := worker.SyncStatus
+	if modelSync == "" {
+		modelSync = "out-of-sync"
+	}
+
+	// Binary sync: if no client version target is configured, treat as synced
+	binarySync := worker.BinarySyncStatus
+	if binarySync == "" {
+		binarySync = "out-of-sync"
+	}
+	if _, err := s.GetClientVersionConfig(); err != nil {
+		binarySync = "synced" // no version target = synced
+	}
+
+	// Backend sync: if no backend version target is configured, treat as synced
+	backendSync := worker.BackendSyncStatus
+	if backendSync == "" {
+		backendSync = "synced" // no backend target = synced
+	}
+	if _, err := s.GetBackendVersionConfig(); err != nil {
+		backendSync = "synced" // no backend target = synced
+	}
+
+	return ComputeOverallSyncStatus(modelSync, binarySync, backendSync)
 }
 
 // WorkerLLMHashMatches returns true if the worker's reported LLM hash matches the expected hash.
@@ -797,4 +847,73 @@ func (s *Store) GetOutdatedWorkers(targetVersion string) ([]Worker, error) {
 	var workers []Worker
 	err := s.DB.Where("status != ? AND client_version != ?", "offline", targetVersion).Find(&workers).Error
 	return workers, err
+}
+
+// --- Backend version config ---
+
+// GetBackendVersionConfig retrieves the current target backend version config.
+func (s *Store) GetBackendVersionConfig() (*BackendVersionConfig, error) {
+	var cfg BackendVersionConfig
+	result := s.DB.First(&cfg)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &cfg, nil
+}
+
+// SetBackendVersionConfig creates or updates the target backend version config.
+func (s *Store) SetBackendVersionConfig(name, version, downloadURL, sha256 string) error {
+	var cfg BackendVersionConfig
+	result := s.DB.First(&cfg)
+
+	if result.Error == gorm.ErrRecordNotFound {
+		cfg = BackendVersionConfig{
+			Name:        name,
+			Version:     version,
+			DownloadURL: downloadURL,
+			SHA256:      sha256,
+			UpdatedAt:   time.Now(),
+		}
+		return s.DB.Create(&cfg).Error
+	}
+
+	if result.Error != nil {
+		return result.Error
+	}
+
+	return s.DB.Model(&cfg).Updates(map[string]any{
+		"name":         name,
+		"version":      version,
+		"download_url": downloadURL,
+		"sha256":       sha256,
+		"updated_at":   time.Now(),
+	}).Error
+}
+
+// SetWorkerBackendHash updates the worker's reported backend hash.
+func (s *Store) SetWorkerBackendHash(fingerprint, hash string) error {
+	return s.DB.Model(&Worker{}).Where("fingerprint = ?", fingerprint).Update("backend_hash", hash).Error
+}
+
+// UpdateWorkerBackendSyncStatus compares the worker's backend hash against the target.
+func (s *Store) UpdateWorkerBackendSyncStatus(fingerprint string) string {
+	var worker Worker
+	if err := s.DB.Where("fingerprint = ?", fingerprint).First(&worker).Error; err != nil {
+		return "out-of-sync"
+	}
+
+	cfg, err := s.GetBackendVersionConfig()
+	if err != nil || cfg.SHA256 == "" {
+		// No target configured — consider synced (nothing to enforce)
+		s.DB.Model(&worker).Update("backend_sync_status", "synced")
+		return "synced"
+	}
+
+	status := "out-of-sync"
+	if worker.BackendHash == cfg.SHA256 {
+		status = "synced"
+	}
+
+	s.DB.Model(&worker).Update("backend_sync_status", status)
+	return status
 }
