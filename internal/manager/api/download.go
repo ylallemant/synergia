@@ -155,13 +155,16 @@ func (d *DownloadAPI) InstallHandler(w http.ResponseWriter, r *http.Request) {
 
 // patchSentinel replaces the sentinel placeholder in the binary with the actual manager URL.
 func patchSentinel(data []byte, managerURL string) ([]byte, error) {
-	sentinel := make([]byte, sentinelSize)
-	copy(sentinel, []byte(sentinelValue))
-	// Rest is already zero-valued (null bytes)
+	sentinelText := []byte(sentinelValue)
 
-	idx := bytes.Index(data, sentinel)
+	idx := bytes.Index(data, sentinelText)
 	if idx == -1 {
 		return nil, fmt.Errorf("sentinel not found in binary")
+	}
+
+	// Ensure there's enough room for the full sentinel region
+	if idx+sentinelSize > len(data) {
+		return nil, fmt.Errorf("sentinel found too close to end of binary")
 	}
 
 	// Build replacement: URL + null padding to sentinelSize
@@ -176,7 +179,7 @@ func patchSentinel(data []byte, managerURL string) ([]byte, error) {
 	copy(result[idx:idx+sentinelSize], replacement)
 
 	// Verify no second occurrence
-	if bytes.Index(result[idx+sentinelSize:], sentinel) != -1 {
+	if bytes.Index(result[idx+sentinelSize:], sentinelText) != -1 {
 		return nil, fmt.Errorf("multiple sentinels found in binary")
 	}
 
