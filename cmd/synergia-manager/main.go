@@ -14,6 +14,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/ylallemant/synergia/internal/manager/acme"
 	"github.com/ylallemant/synergia/internal/manager/api"
 	"github.com/ylallemant/synergia/internal/manager/cache"
 	"github.com/ylallemant/synergia/internal/manager/config"
@@ -160,6 +161,11 @@ func main() {
 	// Set up routes
 	mux := http.NewServeMux()
 
+	// ACME HTTP-01 challenge passthrough — registered first so it shadows
+	// the `/` catch-all (community page) and prevents certificate
+	// issuance traffic from being answered with HTML or auth challenges.
+	acme.RegisterPassthrough(mux)
+
 	// OpenAI-compatible endpoints (called by Flow Engine)
 	mux.Handle("/v1/chat/completions", completions)
 	mux.Handle("/v1/batches/", batchHandler)
@@ -265,9 +271,13 @@ func main() {
 					log.Debug().Str("from", r.URL.String()).Str("to", target).Str("remote", r.RemoteAddr).Msg("redirecting HTTP to HTTPS")
 					http.Redirect(w, r, target, http.StatusMovedPermanently)
 				})
+				// Intercept ACME HTTP-01 challenge paths before redirecting.
+				// LE permits redirects but the cleaner contract is: this
+				// server is for HTTPS upgrades only, ACME validation is
+				// handled by the ingress / solver layer.
 				redirectServer := &http.Server{
 					Addr:    httpRedirectAddr,
-					Handler: redirectHandler,
+					Handler: acme.WrapHandler(redirectHandler),
 				}
 				log.Info().Str("addr", httpRedirectAddr).Msg("HTTP redirect server starting (redirects to HTTPS)")
 				if err := redirectServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

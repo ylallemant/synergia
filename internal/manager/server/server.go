@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/ylallemant/synergia/internal/manager/acme"
 	"github.com/ylallemant/synergia/internal/manager/cache"
 	"github.com/ylallemant/synergia/internal/manager/store"
 )
@@ -45,6 +46,13 @@ func New(addr, apiKey, workerKey string, s *store.Store, c *cache.Cache, insecur
 		tlsKeyFile:  tlsKeyFile,
 		mux:         http.NewServeMux(),
 	}
+
+	// ACME HTTP-01 challenge passthrough — must be registered BEFORE the
+	// `/` catch-all so the longest-prefix match short-circuits the auth
+	// wrapper in dashboardHandler. Without this, cert-manager (and any
+	// other ACME client routing through this listener) gets 401 from the
+	// dashboard's auth check and certificate issuance fails.
+	acme.RegisterPassthrough(srv.mux)
 
 	// Serve static CSS
 	staticSub, _ := fs.Sub(staticFS, "static")
