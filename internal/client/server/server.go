@@ -320,8 +320,16 @@ func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
 	roles, err := s.config.FetchEligibleRoles()
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to fetch roles from manager")
-		// Return empty list on error (manager may not be reachable yet)
-		json.NewEncoder(w).Encode([]any{})
+		// Return tester fallback so the UI never shows "Hardware Insufficient"
+		// when the manager is temporarily unreachable.
+		json.NewEncoder(w).Encode([]map[string]any{{
+			"role":         "tester",
+			"model":        "SmolLM2-135M-Instruct",
+			"quantisation": "Q4_K_M",
+			"min_vram_mb":  512,
+			"description":  "Connectivity testing — minimal model for any hardware",
+			"eligible":     true,
+		}})
 		return
 	}
 	json.NewEncoder(w).Encode(roles)

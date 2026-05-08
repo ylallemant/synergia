@@ -53,9 +53,9 @@ func Load() (*Config, error) {
 	flag.StringVar(&cfg.ManagerURL, "manager-url", defaultURL, "WebSocket URL of the cluster manager")
 	flag.StringVar(&cfg.WorkerKey, "worker-key", os.Getenv("CLUSTER_WORKER_KEY"), "Shared secret for WebSocket auth")
 	flag.StringVar(&cfg.LLMURL, "llm-url", envOrDefault("WORKER_LLM_URL", "http://localhost:8080"), "Local llama-server endpoint")
-	flag.StringVar(&cfg.Model, "model", os.Getenv("WORKER_MODEL"), "Model name to report")
+	flag.StringVar(&cfg.Model, "model", envOrDefault("WORKER_MODEL", "SmolLM2-135M-Instruct"), "Model name to report")
 	flag.StringVar(&cfg.Quantisation, "quantisation", envOrDefault("WORKER_QUANTISATION", "Q4_K_M"), "Quantisation level to report")
-	flag.StringVar(&cfg.Role, "role", envOrDefault("WORKER_ROLE", "embedding"), "Worker role (embedding, inference, ingestion)")
+	flag.StringVar(&cfg.Role, "role", envOrDefault("WORKER_ROLE", "tester"), "Worker role (embedding, inference, ingestion, tester)")
 	flag.StringVar(&cfg.ModelFile, "model-file", os.Getenv("WORKER_MODEL_FILE"), "Path to the GGUF model file (for hash verification)")
 	flag.StringVar(&cfg.DataDir, "data-dir", envOrDefault("CLUSTER_CLIENT_DATA_DIR", defaultDataDir()), "Directory for identity keystore and local state")
 	flag.BoolVar(&cfg.AutoApprove, "auto-approve", envOrDefault("CLUSTER_CLIENT_AUTO_APPROVE", "") == "true", "Automatically accept data collection terms (for testing)")
@@ -99,9 +99,6 @@ func Load() (*Config, error) {
 	}
 	if cfg.WorkerKey == "" {
 		return nil, fmt.Errorf("--worker-key or CLUSTER_WORKER_KEY is required")
-	}
-	if cfg.Model == "" {
-		return nil, fmt.Errorf("--model or WORKER_MODEL is required")
 	}
 
 	return cfg, nil
