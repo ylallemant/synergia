@@ -954,9 +954,13 @@ Security improvements for the container image and Kubernetes deployment. The ite
 |---|---|
 | Statically linked binary | `CGO_ENABLED=0` — no libc dependency |
 | Stripped binary | `-ldflags="-s -w"` — no debug symbols or DWARF |
-| Minimal final image | `alpine:3.20` + `ca-certificates` only — `curl` removed (was present before, not needed at runtime) |
+| Minimal final image | `alpine:3.20` + `ca-certificates` only — `curl` removed (not needed at runtime) |
+| Pinned base image digests | `FROM alpine:3.20@sha256:...` and builder — tag mutation cannot swap the layer |
+| SUID/SGID bits stripped | `find / -perm /6000 -type f -exec chmod a-s {}` — removes privilege escalation via system binaries |
+| Binary owned by nobody | `COPY --chown=nobody:nobody` — binary not writable by the running process |
 | Non-root process | `USER nobody:nobody` (Alpine uid 65534) |
 | Ports declared | `EXPOSE 7500 7501` |
+| Health check | `HEALTHCHECK` via `wget` — tries HTTPS then HTTP, orchestrator restarts unhealthy containers |
 
 #### TODO: read-only root filesystem
 
