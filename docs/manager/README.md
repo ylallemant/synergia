@@ -70,19 +70,30 @@ cmd/synergia-manager/ + internal/manager/
 └── internal/
     ├── config/
     │   └── config.go                # Env-based configuration
-    ├── api/
-    │   ├── backend.go               # Backend version management + download proxy + tags API
+    ├── api/                             # Worker/client-facing handlers only
+    │   ├── backend.go               # Backend download proxy
     │   ├── batch.go                 # OpenAI-compatible /v1/batches (create, retrieve, list, cancel)
     │   ├── branding.go              # Branding CSS API (served to worker dashboards)
     │   ├── community.go             # Community stats API (public, no auth)
     │   ├── completions.go           # OpenAI-compatible /v1/chat/completions handler
     │   ├── consent.go               # Consent + worker config API
     │   ├── download.go              # Client binary download with sentinel patching + install script
-    │   ├── synergia.go             # Synergia API (models, workers, work-units, stats)
+    │   ├── synergia.go              # Synergia API (models, workers, work-units, stats)
     │   ├── errors.go                # Client error reporting API (POST + GET /v1/errors)
-    │   ├── latency.go               # Latency monitoring admin API (GET /v1/latency, config)
     │   ├── models_download.go       # Model file listing + download endpoint
-    │   └── roles.go                 # Role-model mapping + eligibility API
+    │   └── roles.go                 # Role eligibility API (worker-facing)
+    ├── admin/
+    │   ├── api/                     # Admin-only handlers
+    │   │   ├── backend.go           # Backend version management + tags API
+    │   │   ├── branding.go          # Branding admin API
+    │   │   ├── latency.go           # Latency monitoring admin API (GET /v1/latency, config)
+    │   │   ├── oidc.go              # OIDC config read/save API
+    │   │   ├── roles.go             # Role-model mapping admin API
+    │   │   └── version.go           # Binary auto-update admin API
+    │   ├── auth/                    # Session auth + OIDC flow
+    │   └── server/                  # Admin HTTP server
+    │       ├── server.go            # Admin listener (port 7501), login/logout routes
+    │       └── static/              # Embedded HTML (dashboard + OIDC settings page)
     ├── backend/
     │   └── backend.go               # Backend registry: names, URL templates, GitHub tag fetching
     ├── gateway/
@@ -96,13 +107,11 @@ cmd/synergia-manager/ + internal/manager/
     ├── cache/
     │   ├── cache.go                 # In-memory cache (dashboard stats + tag lists, background refresh)
     │   └── github.go                # GitHub Releases API client (client + backend tags)
-    ├── server/
-    │   ├── server.go                # Admin dashboard HTTP server (admin port)
-    │   └── static/                  # Embedded HTML template + CSS for admin dashboard
     ├── public/
     │   └── static/                  # Embedded HTML for public pages (download, community)
     ├── store/
     │   ├── models.go                # GORM models (Worker, WorkUnit, WorkerConfig, RoleModel)
+    │   ├── oidc.go                  # OidcConfig model (persists OIDC config set via admin UI)
     │   └── store.go                 # Database init, migrations, CRUD operations
     └── protocol/
         └── messages.go              # Work unit / result message types (JSON)
@@ -135,16 +144,26 @@ cmd/synergia-manager/ + internal/manager/
 | `CLUSTER_LATENCY_BUCKETS` | `4` | Number of payload-size buckets for the latency matrix |
 | `CLUSTER_LATENCY_WINDOW_HOURS` | `48` | Rolling window (in hours) for payload statistics and sample retention |
 | `CLUSTER_DEVELOPMENT` | `false` | When `true`, batch requests are processed sequentially with random 1–5 s delays (useful for testing/debugging) |
+| `CLUSTER_ADMIN_USER` | `admin` | Username for the admin dashboard login |
+| `CLUSTER_ADMIN_PASSWORD` | `synergia` | Password for the admin dashboard login |
+| `CLUSTER_OIDC_ENABLED` | `false` | Enable OIDC/SSO for admin login |
+| `CLUSTER_OIDC_CLIENT_ID` | (empty) | OIDC client ID |
+| `CLUSTER_OIDC_CLIENT_SECRET` | (empty) | OIDC client secret |
+| `CLUSTER_OIDC_PROVIDER_URL` | (empty) | OIDC provider issuer URL |
+| `CLUSTER_OIDC_REDIRECT_URL` | `http://localhost:7501/auth/oidc/callback` | OIDC redirect URL |
 
 ### Administration Port
 
 The manager starts a **second HTTP listener** on `CLUSTER_ADMIN_ADDR` (default `:7501`) serving administration-only endpoints. This enables Kubernetes deployments to expose the main API and the admin API via separate Services and Ingresses with independent access rules (e.g., admin behind VPN / internal-only ingress).
 
 The admin port serves:
-- **Admin dashboard** (`/`) — auto-refreshing HTML page showing worker counts, role distribution, today's payload stats, and recent client errors
+- **Login page** (`/login`) — username/password form (default: `admin` / `synergia`, configurable via `CLUSTER_ADMIN_USER` / `CLUSTER_ADMIN_PASSWORD`)
+- **Logout** (`/logout`) — ends the session
+- **Admin dashboard** (`/`) — auto-refreshing HTML page showing worker counts, role distribution, today's payload stats, and recent client errors; includes a burger menu for navigation
+- **OIDC/SSO settings** (`/admin/oidc`) — configure OIDC provider (Authentik, Keycloak, etc.); settings are persisted to DB and take effect on next startup
 - **Latency API** (`/v1/latency`, `/v1/latency/config`) — latency matrix queries and configuration
 
-The admin port inherits the same TLS settings as the main port. Authentication uses `CLUSTER_API_KEY` or `CLUSTER_WORKER_KEY` (query param `?key=` also supported for browser access).
+The admin port inherits the same TLS settings as the main port. Browser access uses session-based login (24 h cookie). Admin API endpoints also accept `Authorization: Bearer <CLUSTER_API_KEY>` for programmatic access.
 
 ### Public Pages (on API port)
 
@@ -423,7 +442,7 @@ Workers authenticate model download requests with `Authorization: Bearer <CLUSTE
 
 ## Administration API (port 7501)
 
-Served on the dedicated admin listener. Authenticated with `CLUSTER_API_KEY`.
+Served on the dedicated admin listener. Authenticated via session cookie (browser) or `Authorization: Bearer <CLUSTER_API_KEY>` (programmatic).
 
 ### Backend Administration Endpoints
 
@@ -456,6 +475,13 @@ The response includes the resolved configuration and a `fallback_url` for each c
 | `GET` | `/v1/latency?role=inference` | Latency matrix filtered to a single role |
 | `GET` | `/v1/latency/config` | Current latency monitoring configuration (bucket count, window hours) |
 | `POST` | `/v1/latency/config` | Update latency monitoring configuration |
+
+### OIDC Configuration Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/admin/oidc` | Read current OIDC configuration (from DB or env vars) |
+| `PUT` | `/v1/admin/oidc` | Save OIDC configuration to DB (takes effect on next startup) |
 
 ### Example: Query latency matrix
 
@@ -741,6 +767,270 @@ Examples:
 - `bge-m3-Q4_K_M.gguf`
 
 The manager parses the filename to extract model name and quantisation for the listing endpoint.
+
+## TODO / Roadmap
+
+The items below are the manager-side counterparts of the security roadmap defined in [docs/client/README.md](../client/README.md#todo--roadmap). They are listed in the same order and require coordinated changes on both sides.
+
+---
+
+### Challenge-Response Worker Handshake (replaces `CLUSTER_WORKER_KEY`)
+
+**Current state**: the manager authenticates workers by comparing `Authorization: Bearer <CLUSTER_WORKER_KEY>` on WebSocket upgrade. This shared secret must be pre-distributed.
+
+**Target**: on WebSocket upgrade, before accepting the connection, the manager:
+
+1. Generates a 32-byte random challenge and sends it to the connecting worker
+2. Receives back the worker's signature, long-term Ed25519 public key, and fingerprint
+3. Verifies `SHA256(pubKey) == fingerprint` and `Ed25519.Verify(pubKey, challenge, signature)`
+4. **First connection** (TOFU): registers the `fingerprint → public_key` mapping in the `workers` table; assigns trust score 0
+5. **Subsequent connections**: verifies the public key matches the registered one for that fingerprint; rejects on mismatch
+
+Once in place, `CLUSTER_WORKER_KEY` becomes optional — kept as a fallback for deployments that prefer an allowlist model, but no longer required.
+
+**Manager-side work**:
+- `internal/manager/gateway/websocket.go` — send challenge before upgrade, verify signed response, TOFU registration
+- `internal/manager/store/store.go` — ensure `public_key` column is set on first TOFU registration
+- `internal/manager/config/config.go` — make `WorkerKey` optional (currently fatal if missing)
+- Remove `Authorization: Bearer <CLUSTER_WORKER_KEY>` checks from all worker-authenticated HTTP handlers: `branding`, `consent`, `errors`, `models_download`, `roles` (worker path), `version`, `backend` download proxy
+
+---
+
+### Named API Keys (replaces single `CLUSTER_API_KEY`)
+
+**Current state**: a single `CLUSTER_API_KEY` gates all inference API access. It is configured at startup and cannot be rotated without a restart.
+
+**Target**: admin-managed named API keys stored in the database.
+
+- New `api_keys` table: `id`, `name` (label), `key_hash` (bcrypt/Argon2 of the raw key), `created_at`, `expires_at` (nullable), `last_used_at`
+- Admin dashboard page (`/admin/api-keys`): create key (raw value shown once), list active keys, revoke individual keys
+- New admin API: `GET/POST/DELETE /v1/admin/api-keys`
+- Auth middleware updated: on each inference request, look up the presented Bearer token hash in the `api_keys` table instead of comparing to a single env var
+- `CLUSTER_API_KEY` kept as a legacy fallback during migration, deprecated
+
+---
+
+### Publish Manager Public Key for Worker Pinning
+
+**Current state**: workers have no way to verify they are connected to the legitimate manager (only the manager verifies workers).
+
+**Target**: the manager has a long-term Ed25519 keypair. Its public key is advertised during the WebSocket handshake (alongside the challenge) and also served at a well-known endpoint:
+
+```
+GET /.well-known/synergia-pubkey
+→ { "public_key": "base64(ed25519_pubkey)", "version": "1" }
+```
+
+Workers store this key on first connect (`manager.pub` in their data directory) and verify it on every subsequent connection. The manager's private key is loaded from a key file at startup (similar to TLS cert/key) or auto-generated and persisted.
+
+**Manager-side work**:
+- Key generation / loading at startup (`internal/manager/admin/auth/` or a new `identity/` package)
+- Include public key in WebSocket upgrade response headers
+- Register `GET /.well-known/synergia-pubkey` on the main API port (no auth required)
+
+---
+
+### Sign Manager → Worker Push Messages
+
+**Current state**: `model_update`, `binary_update`, and `backend_update` messages are sent without a signature — workers trust them implicitly because they arrive on an authenticated WebSocket.
+
+**Target**: every push message is signed with the manager's long-term Ed25519 private key before dispatch:
+
+```go
+payload = canonical(type + role + filename + expected_hash + unix_timestamp)
+message.Signature = base64(Ed25519.Sign(manager_privkey, payload))
+message.Timestamp = unix_timestamp   // included in signature; workers reject if stale > 30s
+```
+
+Workers verify the signature against the pinned manager public key before applying any update. A failed verification is logged as an anomaly and reported to the manager via `POST /v1/errors`.
+
+**Manager-side work**:
+- `internal/manager/gateway/websocket.go` — sign all outgoing push messages
+- Add `signature` and `timestamp` fields to push message types in `internal/manager/protocol/messages.go`
+
+---
+
+### Verify Worker Result Signatures
+
+**Current state**: workers already sign every result payload with their Ed25519 private key and include the signature in the WebSocket message. The manager receives it but **does not verify it**.
+
+**Target**: on every result message, the manager verifies:
+
+```go
+Ed25519.Verify(
+  worker.PublicKey,                            // from workers table (set during TOFU)
+  canonical(result.ID + result.Output + result.ProcessingTimeMs),
+  result.Signature,
+)
+```
+
+A failed verification rejects the result (returns an error to the caller), increments a `signature_failures` counter on the worker record, and logs the anomaly. Repeated failures can trigger automatic trust score reduction.
+
+**Manager-side work**:
+- `internal/manager/gateway/websocket.go` — verify signature on result receipt
+- `internal/manager/store/store.go` — add `signature_failures` column to `workers` table
+
+---
+
+### Sign Work Units Before Dispatch
+
+**Current state**: work units are dispatched to workers without a manager signature — a MITM with WebSocket access could inject arbitrary work units.
+
+**Target**: before dispatching a work unit, the manager signs it:
+
+```go
+payload = canonical(wu.ID + wu.Messages + wu.Params + unix_timestamp)
+wu.ManagerSignature = base64(Ed25519.Sign(manager_privkey, payload))
+```
+
+Workers verify the signature against the pinned manager public key before forwarding the unit to `llama-server`. Unsigned or invalidly-signed units are rejected and reported.
+
+Combined with result signing, both signatures are stored in the `work_units` table (`manager_signature`, `worker_signature`). The API response to the caller optionally includes both, enabling end-to-end audit without trusting the manager's word.
+
+**Manager-side work**:
+- `internal/manager/gateway/websocket.go` — sign work units before dispatch
+- `internal/manager/store/store.go` — add `manager_signature`, `worker_signature` columns to `work_units`
+- `internal/manager/api/completions.go`, `batch.go` — optionally surface signatures in API response headers
+
+---
+
+### Verify Signed Consent and Config Payloads
+
+**Current state**: `POST /v1/consent` and `POST /v1/worker-config` are authenticated only by `CLUSTER_WORKER_KEY`. Once that is replaced by challenge-response (see above), the WebSocket session proves worker identity — but HTTP endpoints need a separate mechanism.
+
+**Target**: workers include an `X-Worker-Signature` header on consent and config sync requests:
+
+```
+X-Worker-Signature: base64(Ed25519.Sign(worker_privkey, canonical(method + path + body + unix_timestamp)))
+```
+
+The manager verifies the signature against the worker's registered public key (from the TOFU registration) before storing the record. This provides:
+- **Non-repudiation of consent**: the stored `worker_consents` row proves the holder of that private key accepted the terms
+- **Config integrity**: role preference changes are attributable to the authenticated worker, not a process that merely knows the fingerprint
+
+**Manager-side work**:
+- `internal/manager/api/consent.go` — verify `X-Worker-Signature` on POST
+- `internal/manager/api/roles.go` (worker path) — verify on config sync
+- `internal/manager/store/store.go` — store raw signature in `worker_consents` table (`consent_signature` column)
+
+---
+
+### Operator-Signed Release Artifact Manifest
+
+**Current state**: when the manager proxies or serves binary/backend updates, it provides the SHA256 hash to workers. Workers trust that hash because it came from the manager — a compromised manager can serve a malicious binary with a matching hash.
+
+**Target**: the cluster operator maintains an offline Ed25519 signing key. At release time, a manifest is signed:
+
+```json
+// manifest.json
+{ "version": "v1.2.3", "artifacts": [
+    { "os": "linux", "arch": "amd64", "sha256": "abc..." },
+    { "os": "darwin", "arch": "arm64", "sha256": "def..." }
+] }
+// manifest.sig = Ed25519.Sign(operator_offline_privkey, manifest.json)
+```
+
+Both files ship alongside each release (e.g., as GitHub release assets). The manager:
+1. Fetches manifest + signature when caching a new release
+2. Verifies the signature against the operator's public key (configured via `CLUSTER_OPERATOR_PUBKEY` env var or file)
+3. Serves the verified manifest to workers alongside cached binaries
+
+Workers pin the operator's public key at install time (patched into the binary as a sentinel, alongside the manager URL). The manager becomes a **verified transport** — it cannot forge artifact hashes without the operator's offline private key.
+
+**Manager-side work**:
+- `internal/manager/cache/github.go` — fetch and verify manifest + signature when caching releases
+- `internal/manager/config/config.go` — add `CLUSTER_OPERATOR_PUBKEY` (path or base64 inline)
+- `internal/manager/api/backend.go`, `version.go` — serve manifest alongside download proxy responses
+
+---
+
+### Container and Deployment Hardening
+
+Security improvements for the container image and Kubernetes deployment. The items below complement the protocol-level TODOs above.
+
+#### Already done
+
+| What | How |
+|---|---|
+| Statically linked binary | `CGO_ENABLED=0` — no libc dependency |
+| Stripped binary | `-ldflags="-s -w"` — no debug symbols or DWARF |
+| Distroless final image | `gcr.io/distroless/static-debian12:nonroot` — no shell, no curl, no package manager, CA certs included |
+| Non-root process | Distroless `:nonroot` runs as uid 65532 by default |
+| Ports declared | `EXPOSE 7500 7501` |
+
+#### TODO: read-only root filesystem
+
+The manager only writes to the database path and the backend cache directory. The rest of the filesystem can be immutable at runtime.
+
+Kubernetes:
+```yaml
+securityContext:
+  readOnlyRootFilesystem: true
+volumeMounts:
+  - name: data     # SQLite DB + cache
+    mountPath: /data
+  - name: tmp
+    mountPath: /tmp  # tmpfs emptyDir
+```
+
+Set `CLUSTER_DB_PATH=/data/synergia-manager.db` and `CLUSTER_CACHE_DIR=/data/cache` to redirect all writes to the mounted volume.
+
+#### TODO: secret injection — never bake secrets into the image
+
+`CLUSTER_API_KEY`, `CLUSTER_WORKER_KEY`, TLS private key (`TLS_KEY_FILE`), and the future operator signing key must not appear in:
+- `docker run -e` (visible in `docker inspect`)
+- `docker-compose.yml` committed to git
+- Kubernetes `Deployment` env blocks in plaintext
+
+Preferred approach: Kubernetes `Secret` → `envFrom` or mounted file reference:
+```yaml
+envFrom:
+  - secretRef:
+      name: synergia-manager-secrets
+```
+Or mount secrets as files and point env vars to the paths. For production, integrate with a secrets manager (Vault, AWS Secrets Manager, Doppler) rather than native Kubernetes secrets.
+
+#### TODO: drop all Linux capabilities
+
+```yaml
+securityContext:
+  capabilities:
+    drop: ["ALL"]
+```
+
+The manager binds to ports 7500 and 7501 (above 1024 — `CAP_NET_BIND_SERVICE` not needed). No capabilities are required at all.
+
+#### TODO: image signing (Cosign / Sigstore)
+
+Sign each released image with the operator's offline key:
+```bash
+cosign sign --key operator.key ghcr.io/ylallemant/synergia-manager:v1.2.3
+```
+
+Enforce in Kubernetes via Kyverno or OPA Gatekeeper so only signed images can run. Uses the same operator key infrastructure as the operator-signed release artifacts TODO — one offline key signs both container images and binary manifests.
+
+#### TODO: network segmentation — admin port internal only
+
+The admin port (7501) must not be internet-facing. Enforce at the infrastructure layer, not just by convention:
+
+**Docker Compose**:
+```yaml
+ports:
+  - "0.0.0.0:7500:7500"    # public
+  - "127.0.0.1:7501:7501"  # loopback only
+```
+
+**Kubernetes**: expose port 7500 via a public `LoadBalancer`/`Ingress`; expose port 7501 via a separate `ClusterIP` service with a `NetworkPolicy` restricting ingress to ops pods or a VPN-gated ingress only.
+
+#### TODO: enable RuntimeDefault seccomp profile
+
+```yaml
+securityContext:
+  seccompProfile:
+    type: RuntimeDefault
+```
+
+Kubernetes `RuntimeDefault` (available since 1.19, opt-in) blocks the most dangerous syscalls (`ptrace`, `mount`, `pivot_root`, `setuid`, etc.) with no per-application profiling required. A one-line change with meaningful blast-radius reduction if a vulnerability leads to RCE.
 
 ## Build & Run
 

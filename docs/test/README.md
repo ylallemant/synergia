@@ -14,6 +14,13 @@ End-to-end integration test for the distributed worker pipeline: Manager → Cli
 cd test && go run .
 ```
 
+Can also be run from the repo root:
+
+```bash
+go run ./test
+go run ./test --run
+```
+
 ## Flags
 
 | Flag | Description |
@@ -35,9 +42,9 @@ cd test && go run . --run
 
 Starts all services immediately without running the test suite. Useful for manual exploration, UI development, or debugging. Background goroutines send random payloads and batches to keep the cluster active. Press Ctrl+C for graceful shutdown (services are stopped in reverse order with a 5 s timeout each).
 
-When `--keep-alive` is set, after all tests complete the test prints:
+When `--keep-alive` or `--run` is set, after startup the test prints:
 - Dashboard URL: `http://127.0.0.1:9876/static/index.html`
-- Admin URL: `https://127.0.0.1:7501/?key=<api-key>`
+- Admin URL: `https://127.0.0.1:7501/login  (user: admin / pass: synergia)`
 - Manager URL: `https://127.0.0.1:7500`
 
 Two background goroutines keep the cluster active:
@@ -63,7 +70,7 @@ The synergia-client's system tray icon (🟢/🟡/⚫/🔴) appears in the macOS
 | 9 | Send 3 chat completions: small (~150B), medium (~1KB), large (~5KB) payloads | End-to-end inference + latency bucketing |
 | 10 | Verify client logs show work unit completion and manager logs show result returned | Work unit processing + result relay |
 | 11 | Query `/v1/stats` and verify completed work units | Cluster stats API |
-| 12 | LLM hash verification + model_update push cycle *(skipped with `--keep-alive`)* | File-hash-based model integrity, dual-status lifecycle |
+| 12 | LLM hash verification + model_update push cycle via admin port 7501 *(skipped with `--keep-alive`)* | File-hash-based model integrity, dual-status lifecycle |
 | 13 | Send ERROR trigger payload (`##############ERROR##############`) | Error reporting: client detects trigger, reports error to manager via `POST /v1/errors` |
 | 14 | PAUSE trigger + 429 + batch queue test *(skipped with `--keep-alive`)* | Pause/unpause, 429 rejection, batch queue processing |
 | 15 | Submit 3 batch requests and poll until all complete *(skipped with `--keep-alive`)* | Development mode sequential batch processing, multi-request queue |
@@ -71,10 +78,9 @@ The synergia-client's system tray icon (🟢/🟡/⚫/🔴) appears in the macOS
 | 17 | Consent withdrawal + 429 + re-accept *(skipped with `--keep-alive`)* | Consent revocation via client API, 429 when withdrawn, batch queue during withdrawal, re-accept restores worker |
 | 18 | Query `GET /v1/errors` and verify reports stored | Error persistence in DB |
 | 19 | Query admin port `/v1/latency`, verify 3+ samples in matrix; check `latency_samples` and `workers.total_requests` in SQLite | Latency recording + adaptive bucketing |
-| 20 | Test version admin API | Binary update push, platform awareness |
-| 21 | Test backend admin API with real llama.cpp release *(skipped with `--keep-alive`)* | Backend download, extraction with symlinks, `--version` verification, upgrade to newer release |
+| 20 | Test version admin API (admin port 7501) | Binary update push, platform awareness |
+| 21 | Test backend admin API with real llama.cpp release via admin port 7501 *(skipped with `--keep-alive`)* | Backend download, extraction with symlinks, `--version` verification, upgrade to newer release |
 | 22 | Collect output files | Final state capture |
-| 21 | Backend admin API with real llama.cpp release *(skipped with `--keep-alive`)* | Backend download, install, verify, upgrade |
 
 ### Step 12 Detail: LLM Hash Verification + Model Update Push
 
@@ -182,6 +188,8 @@ All values are hardcoded for isolation — the test uses:
 - Client connects via `wss://127.0.0.1:7500/ws/worker`
 - API key: `test-api-key`
 - Worker key: `test-worker-key`
+- Admin user: `admin` (`CLUSTER_ADMIN_USER=admin` hardcoded to avoid inheriting shell env vars)
+- Admin password: `synergia` (`CLUSTER_ADMIN_PASSWORD=synergia` hardcoded)
 - TLS certificates: auto-generated in `testdata/tls/` (self-signed CA + localhost cert)
 - `CLUSTER_TEST_SETUP=true`: seeds role-model mappings with minimal test thresholds (512 MB VRAM, SmolLM2-135M-Instruct) so any hardware can run all roles. Note: the `tester` role (SmolLM2-135M, 512 MB) is always seeded regardless of this flag
 

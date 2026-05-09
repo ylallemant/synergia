@@ -16,13 +16,15 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/ylallemant/synergia/internal/manager/acme"
 	"github.com/ylallemant/synergia/internal/manager/api"
+	adminapi "github.com/ylallemant/synergia/internal/manager/admin/api"
+	"github.com/ylallemant/synergia/internal/manager/admin/auth"
+	adminsrv "github.com/ylallemant/synergia/internal/manager/admin/server"
 	"github.com/ylallemant/synergia/internal/manager/cache"
 	"github.com/ylallemant/synergia/internal/manager/config"
 	"github.com/ylallemant/synergia/internal/manager/gateway"
 	"github.com/ylallemant/synergia/internal/manager/latency"
 	"github.com/ylallemant/synergia/internal/manager/models"
 	"github.com/ylallemant/synergia/internal/manager/queue"
-	adminsrv "github.com/ylallemant/synergia/internal/manager/server"
 	"github.com/ylallemant/synergia/internal/manager/store"
 )
 
@@ -139,20 +141,27 @@ func main() {
 	}
 
 	consentAPI := api.NewConsentAPI(cfg.WorkerKey, db)
-	brandingAPI := api.NewBrandingAPI(cfg.APIKey, cfg.WorkerKey, db)
+	// Worker-facing APIs
+	brandingAPI := api.NewBrandingAPI(cfg.WorkerKey, db)
 	rolesAPI := api.NewRolesAPI(cfg.APIKey, cfg.WorkerKey, db, cfg.TestSetup)
-	rolesAPI.SetGateway(gw)
-	rolesAPI.SetModelStore(modelStore)
 	errorsAPI := api.NewErrorsAPI(cfg.WorkerKey, db)
-	adminCache := cache.New(db)
-	versionAPI := api.NewVersionAPI(cfg.APIKey, db, gw, adminCache)
-	backendAPI := api.NewBackendAPI(cfg.APIKey, cfg.WorkerKey, db, gw, filepath.Join(cfg.CacheDir, "backend"), adminCache)
+	versionAPI := api.NewVersionAPI()
+	backendAPI := api.NewBackendAPI(cfg.WorkerKey, db, filepath.Join(cfg.CacheDir, "backend"))
 
 	// Initialize latency monitor
 	latencyMonitor := latency.New(db, cfg.LatencyBuckets, cfg.LatencyWindowHours)
 	defer latencyMonitor.Stop()
 	defer batchHandler.Stop()
-	latencyAPI := api.NewLatencyAPI(cfg.APIKey, latencyMonitor)
+	adminCache := cache.New(db)
+
+	// Admin-facing APIs
+	latencyAPI := adminapi.NewLatencyAPI(latencyMonitor)
+	adminVersionAPI := adminapi.NewAdminVersionAPI(db, gw, adminCache)
+	adminBackendAPI := adminapi.NewAdminBackendAPI(db, gw, adminCache)
+	adminRolesAPI := adminapi.NewAdminRolesAPI(db)
+	adminRolesAPI.SetGateway(gw)
+	adminRolesAPI.SetModelStore(modelStore)
+	adminBrandingAPI := adminapi.NewAdminBrandingAPI(brandingAPI)
 
 	// Make latency monitor available to completions handler
 	completions.SetLatencyMonitor(latencyMonitor)
@@ -181,23 +190,16 @@ func main() {
 	mux.HandleFunc("/v1/consent", consentAPI.ConsentHandler)
 	mux.HandleFunc("/v1/worker-config", consentAPI.ConfigHandler)
 
-	// Roles API (eligible roles for workers, admin management)
+	// Roles API (worker-facing — eligible roles query)
 	mux.HandleFunc("/v1/roles", rolesAPI.RolesHandler)
-	mux.HandleFunc("/v1/admin/roles", rolesAPI.AdminRolesHandler)
 
-	// Branding API (CSS customization)
+	// Branding API (worker-facing — CSS served to workers)
 	mux.HandleFunc("/v1/branding/style.css", brandingAPI.StyleHandler)
-	mux.HandleFunc("/v1/admin/branding/css", brandingAPI.AdminUpdateHandler)
 
-	// Client version management API
-	mux.HandleFunc("/v1/admin/version", versionAPI.AdminVersionHandler)
-	mux.HandleFunc("/v1/admin/version/tags", versionAPI.AdminVersionTagsHandler)
+	// Client binary download proxy (worker-facing)
 	mux.HandleFunc("/v1/binary/download", versionAPI.BinaryDownloadHandler)
 
-	// Backend (llama-server) version management API
-	mux.HandleFunc("/v1/admin/backend", backendAPI.AdminBackendHandler)
-	mux.HandleFunc("/v1/admin/backend/tags", backendAPI.AdminBackendTagsHandler)
-	mux.HandleFunc("/v1/admin/backend/names", backendAPI.AdminBackendNamesHandler)
+	// Backend (llama-server) binary download (worker-facing)
 	mux.HandleFunc("/v1/backend/download", backendAPI.BackendDownloadHandler)
 
 	// Model download API (authenticated with worker key)
@@ -245,15 +247,50 @@ func main() {
 	}
 
 	// Administration server (separate port)
-	adminServer := adminsrv.New(cfg.AdminAddr, cfg.APIKey, cfg.WorkerKey, db, adminCache, cfg.Insecure, cfg.TLSCertFile, cfg.TLSKeyFile)
-	adminServer.HandleFunc("/v1/latency", latencyAPI.LatencyHandler)
-	adminServer.HandleFunc("/v1/latency/config", latencyAPI.ConfigHandler)
-	adminServer.HandleFunc("/v1/admin/version", versionAPI.AdminVersionHandler)
-	adminServer.HandleFunc("/v1/admin/version/tags", versionAPI.AdminVersionTagsHandler)
-	adminServer.HandleFunc("/v1/admin/backend", backendAPI.AdminBackendHandler)
-	adminServer.HandleFunc("/v1/admin/backend/tags", backendAPI.AdminBackendTagsHandler)
-	adminServer.HandleFunc("/v1/admin/backend/names", backendAPI.AdminBackendNamesHandler)
-	adminServer.HandleFunc("/v1/admin/roles", rolesAPI.AdminRolesHandler)
+
+	// OIDC config stored via admin UI overrides env vars at startup
+	if oidcDB, err := db.GetOIDCConfig(); err == nil && oidcDB != nil {
+		cfg.OIDCEnabled = oidcDB.Enabled
+		if oidcDB.ClientID != "" {
+			cfg.OIDCClientID = oidcDB.ClientID
+		}
+		if oidcDB.ClientSecret != "" {
+			cfg.OIDCClientSecret = oidcDB.ClientSecret
+		}
+		if oidcDB.ProviderURL != "" {
+			cfg.OIDCProviderURL = oidcDB.ProviderURL
+		}
+		if oidcDB.RedirectURL != "" {
+			cfg.OIDCRedirectURL = oidcDB.RedirectURL
+		}
+	}
+
+	authConfig := auth.Config{
+		AdminUser:        cfg.AdminUser,
+		AdminPassword:    cfg.AdminPassword,
+		OIDCEnabled:      cfg.OIDCEnabled,
+		OIDCClientID:     cfg.OIDCClientID,
+		OIDCClientSecret: cfg.OIDCClientSecret,
+		OIDCProviderURL:  cfg.OIDCProviderURL,
+		OIDCRedirectURL:  cfg.OIDCRedirectURL,
+		Insecure:         cfg.Insecure,
+	}
+	authInstance, err := auth.New(authConfig)
+	if err != nil {
+		log.Fatal().Err(err).Msg("auth initialization error")
+	}
+	adminServer := adminsrv.New(cfg.AdminAddr, cfg.APIKey, db, adminCache, cfg.Insecure, cfg.TLSCertFile, cfg.TLSKeyFile, authInstance)
+	adminServer.HandleFuncAdmin("/v1/latency", latencyAPI.LatencyHandler)
+	adminServer.HandleFuncAdmin("/v1/latency/config", latencyAPI.ConfigHandler)
+	adminServer.HandleFuncAdmin("/v1/admin/version", adminVersionAPI.AdminVersionHandler)
+	adminServer.HandleFuncAdmin("/v1/admin/version/tags", adminVersionAPI.AdminVersionTagsHandler)
+	adminServer.HandleFuncAdmin("/v1/admin/backend", adminBackendAPI.AdminBackendHandler)
+	adminServer.HandleFuncAdmin("/v1/admin/backend/tags", adminBackendAPI.AdminBackendTagsHandler)
+	adminServer.HandleFuncAdmin("/v1/admin/backend/names", adminBackendAPI.AdminBackendNamesHandler)
+	adminServer.HandleFuncAdmin("/v1/admin/roles", adminRolesAPI.AdminRolesHandler)
+	adminServer.HandleFuncAdmin("/v1/admin/branding/css", adminBrandingAPI.AdminUpdateHandler)
+	adminOIDCAPI := adminapi.NewAdminOIDCAPI(db)
+	adminServer.HandleFuncAdmin("/v1/admin/oidc", adminOIDCAPI.ConfigHandler)
 
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

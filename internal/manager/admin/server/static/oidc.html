@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OIDC Settings — Synergia Admin</title>
+<link rel="stylesheet" href="/static/default.css">
+</head>
+<body>
+
+<nav class="top-nav">
+  <a class="nav-brand" href="/">Synergia Admin</a>
+  <button class="nav-burger" id="navToggle" aria-label="Open menu">
+    <span></span><span></span><span></span>
+  </button>
+</nav>
+<div class="nav-overlay" id="navOverlay"></div>
+<aside class="nav-panel" id="navPanel">
+  <button class="nav-close" id="navClose" aria-label="Close menu">&#x2715;</button>
+  <nav class="nav-links">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/admin/oidc" class="nav-link active">OIDC Settings</a>
+    <div class="nav-divider"></div>
+    <a href="/logout" class="nav-link nav-link-danger">Log out</a>
+  </nav>
+</aside>
+
+<h1>OIDC / SSO Configuration</h1>
+<p class="page-subtitle">Configure OpenID Connect for single sign-on (e.g. Authentik, Keycloak). Changes take effect on the next restart.</p>
+
+<div id="oidcActiveNotice" class="notice notice-ok" style="display:none">
+  OIDC is currently active. A &ldquo;Login with OIDC&rdquo; link appears on the login page.
+</div>
+
+<div class="form-section">
+  <form id="oidcForm" class="admin-form">
+
+    <div class="form-row">
+      <label for="oidc_enabled">Enable OIDC</label>
+      <label class="toggle">
+        <input type="checkbox" id="oidc_enabled">
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+
+    <div class="form-row">
+      <label for="oidc_provider">Provider URL</label>
+      <input type="url" id="oidc_provider" placeholder="https://auth.example.com/application/o/synergia/">
+    </div>
+    <p class="field-hint">
+      Authentik: <em>Admin → Providers → [provider]</em>, copy the OpenID Configuration URL and remove the trailing <code>/.well-known/openid-configuration</code>.
+    </p>
+
+    <div class="form-row">
+      <label for="oidc_client_id">Client ID</label>
+      <input type="text" id="oidc_client_id" placeholder="your-client-id">
+    </div>
+
+    <div class="form-row">
+      <label for="oidc_secret">Client Secret</label>
+      <div class="input-with-btn">
+        <input type="password" id="oidc_secret" placeholder="leave blank to keep existing secret">
+        <button type="button" class="btn-small" id="toggleSecret" title="Show / hide">&#128065;</button>
+      </div>
+    </div>
+    <p class="field-hint">Leave blank to keep the currently stored secret unchanged.</p>
+
+    <div class="form-row">
+      <label for="oidc_redirect">Redirect URL</label>
+      <input type="url" id="oidc_redirect" placeholder="https://admin.example.com/auth/oidc/callback">
+    </div>
+    <p class="field-hint">
+      Must exactly match the redirect URI in your provider. The callback path is always <code>/auth/oidc/callback</code>.
+    </p>
+
+    <div class="form-actions">
+      <button type="submit">Save</button>
+      <span id="oidcSaveStatus" class="status-msg"></span>
+      <span id="oidcUpdatedAt" class="field-hint" style="margin-left:auto;padding-left:0"></span>
+    </div>
+  </form>
+</div>
+
+<details class="add-role-details">
+  <summary>Authentik Setup Guide</summary>
+  <div class="guide-steps">
+
+    <div class="guide-step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <strong>Create an OAuth2/OIDC Provider</strong><br>
+        <em>Admin Interface &rarr; Applications &rarr; Providers &rarr; Create &rarr; OAuth2/OpenID Provider</em>
+        <ul>
+          <li>Client type: <strong>Confidential</strong></li>
+          <li>Authorization flow: <em>default-authorization-flow</em></li>
+          <li>Redirect URI: <code id="guideCallbackURL"></code></li>
+          <li>Scopes: <code>openid</code>&nbsp;<code>profile</code>&nbsp;<code>email</code></li>
+        </ul>
+        Copy the generated <strong>Client ID</strong> and <strong>Client Secret</strong> into the form above.
+      </div>
+    </div>
+
+    <div class="guide-step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <strong>Create an Application</strong><br>
+        <em>Applications &rarr; Applications &rarr; Create</em><br>
+        Give it a name (e.g. <code>Synergia Admin</code>) and bind it to the provider from step&nbsp;1.
+      </div>
+    </div>
+
+    <div class="guide-step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <strong>Configure Bindings (access control)</strong><br>
+        Under the Application &rarr; <em>Policy / Group / User Bindings</em> tab:
+        <ul>
+          <li>Create a group <code>synergia-admins</code> in Authentik and add the admin users to it</li>
+          <li>Add a <strong>Group Binding</strong> &rarr; select <code>synergia-admins</code> — only members can log in</li>
+          <li>Optionally add a <strong>Policy Binding</strong> to enforce MFA on this application</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="guide-step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <strong>Find the Provider (Issuer) URL</strong><br>
+        <em>Admin &rarr; Providers &rarr; [your provider]</em><br>
+        Copy the <strong>OpenID Configuration URL</strong>, then remove the trailing <code>/.well-known/openid-configuration</code>.<br>
+        Example: <code>https://auth.example.com/application/o/synergia/</code>
+      </div>
+    </div>
+
+    <div class="guide-step">
+      <div class="step-num">5</div>
+      <div class="step-body">
+        <strong>Save and restart</strong><br>
+        Fill in the form above and click <strong>Save</strong>, then restart the manager.
+        The login page will show a <em>Login with OIDC</em> link once OIDC is active.
+      </div>
+    </div>
+
+  </div>
+</details>
+
+<div class="footer">Synergia Cluster Manager</div>
+
+<script>
+const API_KEY = "{{.APIKey}}";
+const headers = {"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"};
+
+// --- Nav ---
+function openNav()  { document.getElementById("navPanel").classList.add("open");  document.getElementById("navOverlay").classList.add("show"); }
+function closeNav() { document.getElementById("navPanel").classList.remove("open"); document.getElementById("navOverlay").classList.remove("show"); }
+document.getElementById("navToggle").addEventListener("click", openNav);
+document.getElementById("navClose").addEventListener("click", closeNav);
+document.getElementById("navOverlay").addEventListener("click", closeNav);
+
+// --- Show/hide secret ---
+document.getElementById("toggleSecret").addEventListener("click", () => {
+  const f = document.getElementById("oidc_secret");
+  f.type = f.type === "password" ? "text" : "password";
+});
+
+// --- Guide callback URL hint (updates as user types redirect URL) ---
+function updateGuideCallback() {
+  const val = document.getElementById("oidc_redirect").value.trim();
+  const origin = val ? val.replace(/\/auth\/oidc\/callback$/, "") : window.location.origin;
+  document.getElementById("guideCallbackURL").textContent = origin + "/auth/oidc/callback";
+}
+document.getElementById("oidc_redirect").addEventListener("input", updateGuideCallback);
+updateGuideCallback();
+
+// --- Load stored config ---
+async function loadConfig() {
+  try {
+    const resp = await fetch("/v1/admin/oidc", {headers});
+    if (!resp.ok) return;
+    const cfg = await resp.json();
+    if (!cfg.is_configured) return;
+    document.getElementById("oidc_enabled").checked = cfg.enabled;
+    document.getElementById("oidc_provider").value  = cfg.provider_url  || "";
+    document.getElementById("oidc_client_id").value = cfg.client_id     || "";
+    document.getElementById("oidc_redirect").value  = cfg.redirect_url  || "";
+    if (cfg.client_secret) {
+      document.getElementById("oidc_secret").placeholder = "(secret stored — leave blank to keep)";
+    }
+    if (cfg.updated_at) {
+      document.getElementById("oidcUpdatedAt").textContent = "Last saved: " + new Date(cfg.updated_at).toLocaleString();
+    }
+    if (cfg.enabled) {
+      document.getElementById("oidcActiveNotice").style.display = "";
+    }
+    updateGuideCallback();
+  } catch(e) { console.error("Failed to load OIDC config:", e); }
+}
+loadConfig();
+
+// --- Save ---
+document.getElementById("oidcForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const status = document.getElementById("oidcSaveStatus");
+  const body = {
+    enabled:       document.getElementById("oidc_enabled").checked,
+    provider_url:  document.getElementById("oidc_provider").value.trim(),
+    client_id:     document.getElementById("oidc_client_id").value.trim(),
+    client_secret: document.getElementById("oidc_secret").value,
+    redirect_url:  document.getElementById("oidc_redirect").value.trim(),
+  };
+  try {
+    const resp = await fetch("/v1/admin/oidc", {method: "PUT", headers, body: JSON.stringify(body)});
+    if (resp.ok) {
+      showStatus(status, "Saved ✓ — restart to apply", true);
+      document.getElementById("oidc_secret").value = "";
+      document.getElementById("oidc_secret").placeholder = "(secret stored — leave blank to keep)";
+      document.getElementById("oidcUpdatedAt").textContent = "Last saved: " + new Date().toLocaleString();
+    } else {
+      showStatus(status, "Error " + resp.status + ": " + await resp.text(), false);
+    }
+  } catch(err) { showStatus(status, "Network error: " + err.message, false); }
+});
+
+function showStatus(el, msg, ok) {
+  el.textContent = msg;
+  el.className = "status-msg " + (ok ? "ok" : "err");
+  setTimeout(() => { el.textContent = ""; el.className = "status-msg"; }, 5000);
+}
+</script>
+</body>
+</html>

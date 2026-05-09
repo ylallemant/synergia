@@ -47,6 +47,8 @@ go run ./cmd/synergia-manager --development
 
 Environment variables: `CLUSTER_LISTEN_ADDR`, `CLUSTER_API_KEY`, `CLUSTER_WORKER_KEY`, `CLUSTER_DB_PATH`, etc.
 
+The admin dashboard is available at `https://localhost:7501/login` (default credentials: admin / synergia).
+
 ### Client
 
 ```bash
@@ -64,6 +66,8 @@ go run ./cmd/synergia-client \
 
 ```bash
 cd test && go run .
+# or from the repo root:
+go run ./test
 ```
 
 Downloads test models automatically on first run, starts manager + client + llama-server, runs the full validation suite.
@@ -83,6 +87,7 @@ Downloads test models automatically on first run, starts manager + client + llam
 - **Auto-start** — macOS LaunchAgent, Linux systemd user service, Windows Registry
 - **System tray** — connection state icon with Pause/Resume/Quit menu
 - **Admin configuration UI** — version management, role-model matrix, worker overview
+- **Session-based admin authentication** — form login at `/login` (default: admin/synergia) with OIDC/SSO support (Authentik, Keycloak)
 - **Multi-platform** — Linux/macOS/Windows, amd64/arm64
 
 ## GPU Platform Support
@@ -120,6 +125,9 @@ cmd/
 internal/
   client/              Client internal packages
   manager/             Manager internal packages
+    api/               Worker/client-facing handlers
+    admin/             Admin server, auth, and admin-only handlers
+    store/             Database models (includes oidc.go for OIDC config)
 test/                  Integration test suite
 deploy/                Dockerfile
 docs/                  Architecture documentation

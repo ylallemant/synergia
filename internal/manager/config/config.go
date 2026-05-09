@@ -47,6 +47,15 @@ type Config struct {
 
 	// Client distribution
 	ClientBinaryDir string // Directory containing pre-built generic client binaries
+
+	// Authentication
+	AdminUser        string // Default admin username
+	AdminPassword    string // Default admin password
+	OIDCEnabled      bool   // Enable OIDC authentication
+	OIDCClientID     string // OIDC client ID
+	OIDCClientSecret string // OIDC client secret
+	OIDCProviderURL  string // OIDC provider issuer URL
+	OIDCRedirectURL  string // OIDC redirect URL
 }
 
 func Load() (*Config, error) {
@@ -74,6 +83,13 @@ func Load() (*Config, error) {
 		LatencyBuckets:     envOrDefaultInt("CLUSTER_LATENCY_BUCKETS", 4),
 		LatencyWindowHours: envOrDefaultInt("CLUSTER_LATENCY_WINDOW_HOURS", 48),
 		ClientBinaryDir:    envOrDefault("CLUSTER_CLIENT_BINARY_DIR", "./binaries"),
+		AdminUser:          envOrDefault("CLUSTER_ADMIN_USER", "admin"),
+		AdminPassword:      envOrDefault("CLUSTER_ADMIN_PASSWORD", "synergia"),
+		OIDCEnabled:        os.Getenv("CLUSTER_OIDC_ENABLED") == "true",
+		OIDCClientID:       os.Getenv("CLUSTER_OIDC_CLIENT_ID"),
+		OIDCClientSecret:   os.Getenv("CLUSTER_OIDC_CLIENT_SECRET"),
+		OIDCProviderURL:    os.Getenv("CLUSTER_OIDC_PROVIDER_URL"),
+		OIDCRedirectURL:    envOrDefault("CLUSTER_OIDC_REDIRECT_URL", "http://localhost:7501/auth/oidc/callback"),
 	}
 
 	if cfg.APIKey == "" {

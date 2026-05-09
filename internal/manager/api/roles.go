@@ -1,28 +1,19 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 
 	"github.com/rs/zerolog/log"
-	"github.com/ylallemant/synergia/internal/manager/models"
 	"github.com/ylallemant/synergia/internal/manager/store"
 )
 
-// ModelUpdatePusher is an interface for pushing model updates to connected workers.
-type ModelUpdatePusher interface {
-	PushModelUpdate(role, model, quantisation, filename, modelFileHash, llmHash string) error
-}
-
-// RolesAPI handles role-model mapping queries and eligibility checks.
+// RolesAPI handles role-model mapping queries for workers.
 type RolesAPI struct {
-	workerKey  string
-	apiKey     string
-	store      *store.Store
-	testSetup  bool
-	gateway    ModelUpdatePusher
-	modelStore models.Store
+	workerKey string
+	apiKey    string
+	store     *store.Store
+	testSetup bool
 }
 
 func NewRolesAPI(apiKey, workerKey string, s *store.Store, testSetup bool) *RolesAPI {
@@ -34,17 +25,7 @@ func NewRolesAPI(apiKey, workerKey string, s *store.Store, testSetup bool) *Role
 	}
 }
 
-// SetGateway sets the gateway for pushing model updates to workers.
-func (r *RolesAPI) SetGateway(gw ModelUpdatePusher) {
-	r.gateway = gw
-}
-
-// SetModelStore sets the model store for computing file hashes.
-func (r *RolesAPI) SetModelStore(ms models.Store) {
-	r.modelStore = ms
-}
-
-// RoleInfo is returned to clients showing available roles and eligibility.
+// RoleInfo is returned to workers showing available roles and eligibility.
 type RoleInfo struct {
 	Role         string `json:"role"`
 	Model        string `json:"model"`
@@ -55,8 +36,6 @@ type RoleInfo struct {
 }
 
 // RolesHandler handles GET /v1/roles?fingerprint=<fp>
-// Returns all roles with eligibility computed from the worker's hardware.
-// If no fingerprint is provided, returns roles without eligibility (all marked eligible=false).
 func (r *RolesAPI) RolesHandler(w http.ResponseWriter, req *http.Request) {
 	if !r.authenticate(req) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -75,7 +54,6 @@ func (r *RolesAPI) RolesHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Determine worker's VRAM from consent record (if fingerprint provided)
 	fingerprint := req.URL.Query().Get("fingerprint")
 	var workerVRAM int
 	if fingerprint != "" {
@@ -110,89 +88,6 @@ func (r *RolesAPI) RolesHandler(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
-// AdminRolesHandler handles GET/POST/PUT on /v1/admin/roles for managing role-model mappings.
-func (r *RolesAPI) AdminRolesHandler(w http.ResponseWriter, req *http.Request) {
-	if !r.authenticateAdmin(req) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	switch req.Method {
-	case http.MethodGet:
-		roles, err := r.store.GetRoleModels()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "database error")
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(roles)
-
-	case http.MethodPost, http.MethodPut:
-		var req2 struct {
-			Role          string `json:"role"`
-			Model         string `json:"model"`
-			Quantisation  string `json:"quantisation"`
-			Filename      string `json:"filename"`
-			ModelFileHash string `json:"model_file_hash"`
-			MinVRAMMB     int    `json:"min_vram_mb"`
-			Description   string `json:"description"`
-		}
-		if err := json.NewDecoder(req.Body).Decode(&req2); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON")
-			return
-		}
-		if req2.Role == "" || req2.Model == "" || req2.MinVRAMMB <= 0 {
-			writeError(w, http.StatusBadRequest, "role, model, and min_vram_mb (>0) are required")
-			return
-		}
-		if err := r.store.UpsertRoleModel(req2.Role, req2.Model, req2.Quantisation, req2.Filename, req2.ModelFileHash, req2.MinVRAMMB, req2.Description); err != nil {
-			writeError(w, http.StatusInternalServerError, "database error")
-			return
-		}
-		log.Info().Str("role", req2.Role).Str("model", req2.Model).Str("filename", req2.Filename).Int("min_vram_mb", req2.MinVRAMMB).Msg("role-model mapping updated")
-
-		// If no file hash provided but filename exists, try to compute from model store
-		if req2.ModelFileHash == "" && req2.Filename != "" && r.modelStore != nil {
-			if hash, hashErr := r.modelStore.FileHash(context.Background(), req2.Filename); hashErr == nil {
-				req2.ModelFileHash = hash
-				// Persist the computed hash
-				_ = r.store.UpsertRoleModel(req2.Role, req2.Model, req2.Quantisation, req2.Filename, hash, req2.MinVRAMMB, req2.Description)
-				log.Info().Str("role", req2.Role).Str("hash", hash[:16]+"...").Msg("computed model file hash from store")
-			} else {
-				log.Warn().Err(hashErr).Str("filename", req2.Filename).Msg("could not compute model file hash from store")
-			}
-		}
-
-		// Push model_update to connected workers so they can switch to the new configuration
-		if r.gateway != nil && req2.ModelFileHash != "" {
-			llmHash := store.ComputeLLMHash(req2.Role, req2.ModelFileHash)
-			if err := r.gateway.PushModelUpdate(req2.Role, req2.Model, req2.Quantisation, req2.Filename, req2.ModelFileHash, llmHash); err != nil {
-				log.Warn().Err(err).Msg("failed to push model update to worker (may not be connected)")
-			}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-
-	case http.MethodDelete:
-		role := req.URL.Query().Get("role")
-		if role == "" {
-			writeError(w, http.StatusBadRequest, "role query parameter is required")
-			return
-		}
-		if err := r.store.DeleteRoleModel(role); err != nil {
-			writeError(w, http.StatusInternalServerError, "database error")
-			return
-		}
-		log.Info().Str("role", role).Msg("role-model mapping deleted")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
 func (r *RolesAPI) authenticate(req *http.Request) bool {
 	auth := req.Header.Get("Authorization")
 	if auth == "Bearer "+r.workerKey {
@@ -202,9 +97,4 @@ func (r *RolesAPI) authenticate(req *http.Request) bool {
 		return true
 	}
 	return false
-}
-
-func (r *RolesAPI) authenticateAdmin(req *http.Request) bool {
-	auth := req.Header.Get("Authorization")
-	return auth == "Bearer "+r.apiKey
 }

@@ -41,7 +41,7 @@ func OpenPostgres(dsn string) (*Store, error) {
 }
 
 func migrate(db *gorm.DB, driver, info string) (*Store, error) {
-	if err := db.AutoMigrate(&Worker{}, &WorkUnit{}, &WorkerConsent{}, &WorkerConfig{}, &BrandingConfig{}, &RoleModel{}, &ClientError{}, &BatchRequest{}, &LatencySample{}, &LatencyHourlyStat{}, &ClientVersionConfig{}, &BackendVersionConfig{}); err != nil {
+	if err := db.AutoMigrate(&Worker{}, &WorkUnit{}, &WorkerConsent{}, &WorkerConfig{}, &BrandingConfig{}, &RoleModel{}, &ClientError{}, &BatchRequest{}, &LatencySample{}, &LatencyHourlyStat{}, &ClientVersionConfig{}, &BackendVersionConfig{}, &OidcConfig{}); err != nil {
 		return nil, fmt.Errorf("migration failed: %w", err)
 	}
 

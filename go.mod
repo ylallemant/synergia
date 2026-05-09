@@ -4,11 +4,13 @@ go 1.25.0
 
 require (
 	fyne.io/systray v1.12.1
+	github.com/coreos/go-oidc/v3 v3.12.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/minio/minio-go/v7 v7.1.0
 	github.com/rs/zerolog v1.35.1
 	golang.org/x/crypto v0.50.0
+	golang.org/x/oauth2 v0.28.0
 	golang.org/x/sys v0.43.0
 	gorm.io/driver/postgres v1.5.11
 	gorm.io/gorm v1.25.12
@@ -19,6 +21,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/glebarez/go-sqlite v1.21.2 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
+	github.com/go-jose/go-jose/v4 v4.0.2 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

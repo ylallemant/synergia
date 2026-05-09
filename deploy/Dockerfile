@@ -9,11 +9,11 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /synergia-manager ./cmd/synergia-manager
 
-FROM alpine:3.20
+# Distroless: no shell, no package manager, no curl — CA certs included, runs as uid 65532
+FROM gcr.io/distroless/static-debian12:nonroot
 
-RUN apk add --no-cache ca-certificates curl
-COPY --from=builder /synergia-manager /usr/local/bin/synergia-manager
+COPY --from=builder /synergia-manager /synergia-manager
 
-USER nobody:nobody
+EXPOSE 7500 7501
 
-ENTRYPOINT ["synergia-manager"]
+ENTRYPOINT ["/synergia-manager"]

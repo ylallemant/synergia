@@ -7,6 +7,24 @@
 <link rel="stylesheet" href="/static/default.css">
 </head>
 <body>
+
+<nav class="top-nav">
+  <a class="nav-brand" href="/">Synergia Admin</a>
+  <button class="nav-burger" id="navToggle" aria-label="Open menu">
+    <span></span><span></span><span></span>
+  </button>
+</nav>
+<div class="nav-overlay" id="navOverlay"></div>
+<aside class="nav-panel" id="navPanel">
+  <button class="nav-close" id="navClose" aria-label="Close menu">&#x2715;</button>
+  <nav class="nav-links">
+    <a href="/" class="nav-link active">Dashboard</a>
+    <a href="/admin/oidc" class="nav-link">OIDC Settings</a>
+    <div class="nav-divider"></div>
+    <a href="/logout" class="nav-link nav-link-danger">Log out</a>
+  </nav>
+</aside>
+
 <h1>Synergia Cluster Manager</h1>
 
 <div id="live-stats">
@@ -171,6 +189,13 @@
 <div class="footer">Generated at {{.GeneratedAt}}</div>
 
 <script>
+// --- Nav ---
+function openNav()  { document.getElementById("navPanel").classList.add("open");  document.getElementById("navOverlay").classList.add("show"); }
+function closeNav() { document.getElementById("navPanel").classList.remove("open"); document.getElementById("navOverlay").classList.remove("show"); }
+document.getElementById("navToggle").addEventListener("click", openNav);
+document.getElementById("navClose").addEventListener("click", closeNav);
+document.getElementById("navOverlay").addEventListener("click", closeNav);
+
 const API_KEY = "{{.APIKey}}";
 const headers = {"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"};
 

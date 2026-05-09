@@ -49,6 +49,8 @@ const (
 	llamaServerPort     = "8090"
 	apiKey              = "test-api-key"
 	workerKey           = "test-worker-key"
+	adminUser           = "admin"
+	adminPassword       = "synergia"
 )
 
 // logBuffer captures process stdout/stderr with line-level synchronization.
@@ -152,11 +154,8 @@ func main() {
 	log.Info().Msg("=== Synergia Integration Test ===")
 
 	// Resolve paths
-	testDir, err := os.Getwd()
-	if err != nil {
-		fatal("get working dir: %v", err)
-	}
-	repoRoot := filepath.Join(testDir, "..")
+	repoRoot := findRepoRoot()
+	testDir := filepath.Join(repoRoot, "test")
 	modelsDir := filepath.Join(testDir, "testdata", "models")
 	runDir := filepath.Join(testDir, "runs", time.Now().Format("2006-01-02_15-04-05"))
 	dataDir := filepath.Join(runDir, "data")
@@ -279,6 +278,8 @@ func main() {
 		"CLUSTER_DB_PATH="+filepath.Join(dataDir, "cluster-manager.db"),
 		"CLUSTER_TEST_SETUP=true",
 		"CLUSTER_ADMIN_ADDR="+managerAdminAddr,
+		"CLUSTER_ADMIN_USER="+adminUser,
+		"CLUSTER_ADMIN_PASSWORD="+adminPassword,
 		"TLS_CERT_FILE="+serverCertPath,
 		"TLS_KEY_FILE="+serverKeyPath,
 		"CLUSTER_HTTP_REDIRECT_ADDR="+managerRedirectAddr,
@@ -459,7 +460,7 @@ func main() {
 			"description":  "Updated for LLM hash test — model 2",
 		}
 		updateBody, _ := json.Marshal(updatePayload)
-		updateReq, _ := http.NewRequest(http.MethodPut, "https://"+managerAddr+"/v1/admin/roles", bytes.NewReader(updateBody))
+		updateReq, _ := http.NewRequest(http.MethodPut, "https://"+managerAdminAddr+"/v1/admin/roles", bytes.NewReader(updateBody))
 		updateReq.Header.Set("Authorization", "Bearer "+apiKey)
 		updateReq.Header.Set("Content-Type", "application/json")
 		updateResp, updateErr := http.DefaultClient.Do(updateReq)
@@ -570,7 +571,7 @@ func main() {
 			"description":  "Vector embeddings (test mode — minimal model)",
 		}
 		revertBody, _ := json.Marshal(revertPayload)
-		revertReq, _ := http.NewRequest(http.MethodPut, "https://"+managerAddr+"/v1/admin/roles", bytes.NewReader(revertBody))
+		revertReq, _ := http.NewRequest(http.MethodPut, "https://"+managerAdminAddr+"/v1/admin/roles", bytes.NewReader(revertBody))
 		revertReq.Header.Set("Authorization", "Bearer "+apiKey)
 		revertReq.Header.Set("Content-Type", "application/json")
 		revertResp, _ := http.DefaultClient.Do(revertReq)
@@ -908,7 +909,7 @@ func main() {
 	{
 		// POST a target version
 		versionPayload := `{"target_version":"v99.0.0-test","rollout_mode":"all","rollout_percentage":100,"sha256":""}`
-		versionReq, _ := http.NewRequest(http.MethodPost, "https://"+managerAddr+"/v1/admin/version", bytes.NewBufferString(versionPayload))
+		versionReq, _ := http.NewRequest(http.MethodPost, "https://"+managerAdminAddr+"/v1/admin/version", bytes.NewBufferString(versionPayload))
 		versionReq.Header.Set("Authorization", "Bearer "+apiKey)
 		versionReq.Header.Set("Content-Type", "application/json")
 		versionResp, err := http.DefaultClient.Do(versionReq)
@@ -922,7 +923,7 @@ func main() {
 		pass("POST /v1/admin/version → 200")
 
 		// GET the config back
-		versionGetResp, err := apiGet("https://"+managerAddr+"/v1/admin/version", apiKey)
+		versionGetResp, err := apiGet("https://"+managerAdminAddr+"/v1/admin/version", apiKey)
 		if err != nil {
 			fatal("version GET failed: %v", err)
 		}
@@ -955,7 +956,7 @@ func main() {
 			// Use the real llama.cpp release URL template
 			// First: set backend version b9049 (triggers real download)
 			backendPayload1 := `{"name":"llama.cpp","version":"b9049","sha256":""}`
-			backendReq1, _ := http.NewRequest(http.MethodPost, "https://"+managerAddr+"/v1/admin/backend", bytes.NewBufferString(backendPayload1))
+			backendReq1, _ := http.NewRequest(http.MethodPost, "https://"+managerAdminAddr+"/v1/admin/backend", bytes.NewBufferString(backendPayload1))
 			backendReq1.Header.Set("Authorization", "Bearer "+apiKey)
 			backendReq1.Header.Set("Content-Type", "application/json")
 			backendResp1, err := http.DefaultClient.Do(backendReq1)
@@ -990,7 +991,7 @@ func main() {
 			pass("Backend binary verified: %s", strings.TrimSpace(string(versionOut)))
 
 			// GET the config back
-			backendGetResp, err := apiGet("https://"+managerAddr+"/v1/admin/backend", apiKey)
+			backendGetResp, err := apiGet("https://"+managerAdminAddr+"/v1/admin/backend", apiKey)
 			if err != nil {
 				fatal("backend GET failed: %v", err)
 			}
@@ -1001,7 +1002,7 @@ func main() {
 
 			// Second: upgrade to b9050 (triggers real update)
 			backendPayload2 := `{"name":"llama.cpp","version":"b9050","sha256":""}`
-			backendReq2, _ := http.NewRequest(http.MethodPost, "https://"+managerAddr+"/v1/admin/backend", bytes.NewBufferString(backendPayload2))
+			backendReq2, _ := http.NewRequest(http.MethodPost, "https://"+managerAdminAddr+"/v1/admin/backend", bytes.NewBufferString(backendPayload2))
 			backendReq2.Header.Set("Authorization", "Bearer "+apiKey)
 			backendReq2.Header.Set("Content-Type", "application/json")
 			backendResp2, err := http.DefaultClient.Do(backendReq2)
@@ -1040,7 +1041,7 @@ func main() {
 		log.Info().Msg("")
 		log.Info().Msg("--keep-alive: services still running")
 		log.Info().Msgf("  Dashboard: http://127.0.0.1:9876/static/index.html")
-		log.Info().Msgf("  Admin:     https://%s/?key=%s", managerAdminAddr, apiKey)
+		log.Info().Msgf("  Admin:     https://%s/login  (user: %s / pass: %s)", managerAdminAddr, adminUser, adminPassword)
 		log.Info().Msgf("  Manager:   https://%s", managerAddr)
 		log.Info().Msg("  Press Ctrl+C or use tray → Quit to stop")
 
@@ -1161,6 +1162,26 @@ func main() {
 }
 
 // --- Helpers ---
+
+// findRepoRoot walks up from the current working directory until it finds go.mod,
+// returning that directory as the repository root. This lets the test be invoked
+// as either `go run .` (from test/) or `go run ./test` (from the repo root).
+func findRepoRoot() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		fatal("get working dir: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			fatal("could not locate go.mod — run from inside the synergia repository")
+		}
+		dir = parent
+	}
+}
 
 // cleanupOldRuns removes old run directories, keeping only the most recent `keep` entries.
 func cleanupOldRuns(runsDir string, keep int) {
@@ -1674,11 +1695,8 @@ func runServices() {
 
 	log.Info().Msg("=== Synergia Run Mode (no tests) ===")
 
-	testDir, err := os.Getwd()
-	if err != nil {
-		fatal("get working dir: %v", err)
-	}
-	repoRoot := filepath.Join(testDir, "..")
+	repoRoot := findRepoRoot()
+	testDir := filepath.Join(repoRoot, "test")
 	modelsDir := filepath.Join(testDir, "testdata", "models")
 	runDir := filepath.Join(testDir, "runs", time.Now().Format("2006-01-02_15-04-05"))
 	dataDir := filepath.Join(runDir, "data")
@@ -1762,6 +1780,8 @@ func runServices() {
 		"CLUSTER_DB_PATH="+filepath.Join(dataDir, "cluster-manager.db"),
 		"CLUSTER_TEST_SETUP=true",
 		"CLUSTER_ADMIN_ADDR="+managerAdminAddr,
+		"CLUSTER_ADMIN_USER="+adminUser,
+		"CLUSTER_ADMIN_PASSWORD="+adminPassword,
 		"TLS_CERT_FILE="+serverCertPath,
 		"TLS_KEY_FILE="+serverKeyPath,
 		"CLUSTER_HTTP_REDIRECT_ADDR="+managerRedirectAddr,
@@ -1806,7 +1826,7 @@ func runServices() {
 	log.Info().Msg("")
 	log.Info().Msg("All services started in development mode (no tests)")
 	log.Info().Msgf("  Client Dashboard: http://127.0.0.1:9876/static/index.html")
-	log.Info().Msgf("  Admin Dashboard:  https://%s/?key=%s", managerAdminAddr, apiKey)
+	log.Info().Msgf("  Admin Dashboard:  https://%s/login  (user: %s / pass: %s)", managerAdminAddr, adminUser, adminPassword)
 	log.Info().Msgf("  Manager API:      https://%s", managerAddr)
 	log.Info().Msg("  Press Ctrl+C or use tray → Quit to stop")
 	log.Info().Msg("")

@@ -47,6 +47,286 @@ Minimal implementation: connects to a single cluster manager, shells out to a lo
 - Multi-model support (Phase 1 = one model loaded at a time)
 - mTLS certificates (Phase 1 uses TLS + shared key auth)
 
+---
+
+## TODO / Roadmap
+
+### Eliminating Pre-Shared Keys
+
+**Current problem**: both `CLUSTER_WORKER_KEY` (worker auth) and `CLUSTER_API_KEY` (inference API auth) are shared secrets that must be distributed before the binaries can start. This is impractical for the volunteer install flow — a user who downloads and runs the binary should be able to connect to the cluster without knowing any secret in advance.
+
+#### Path: eliminate `CLUSTER_WORKER_KEY`
+
+The client already has a persistent Ed25519 identity (`identity.enc` / `identity.pub`). The shared key can be replaced by a cryptographic challenge-response handshake:
+
+```
+Manager                               Client
+  │                                      │
+  │── 32-byte random challenge ─────────▶│
+  │                                      │── sign(challenge, ed25519_private_key)
+  │◀── signature, public_key, fp ────────│
+  │   verify:                            │
+  │     SHA256(pubKey) == fingerprint    │
+  │     Ed25519.Verify(pubKey, sig)      │
+  │── accept ───────────────────────────▶│
+```
+
+**First connection** — trust-on-first-use (TOFU, like SSH): the manager registers the `fingerprint → public_key` mapping. A new worker is accepted unconditionally on first contact and assigned a trust score of 0.
+
+**Subsequent connections** — the manager verifies the signed challenge against the stored public key for that fingerprint. A fingerprint whose public key changes is rejected (key mismatch = possible impersonation).
+
+**Migration path**: keep `CLUSTER_WORKER_KEY` as an optional override for existing deployments (cluster operators who prefer a static allowlist); remove the requirement entirely once challenge-response is the default.
+
+**Impact on user install flow**:
+1. User runs the install script — binary is downloaded with manager URL pre-patched via sentinel
+2. Client starts — generates identity if none exists, signs the handshake challenge
+3. Manager accepts on first connect (TOFU), registers fingerprint
+4. No secret to distribute, no pre-configuration needed
+
+#### Path: eliminate `CLUSTER_API_KEY` for inference consumers
+
+`CLUSTER_API_KEY` is used by external inference consumers (Flow Engine, any OpenAI-compatible client). The cluster operator still needs to gate who can call `/v1/chat/completions`. Options in priority order:
+
+1. **Named API keys** (practical, near-term): admin generates named keys via the admin dashboard (`/admin/api-keys`), stored and hashed in DB, revocable without restarting the manager. Each key carries an optional label (e.g., "flow-engine-prod") and expiry date.
+
+2. **OIDC token exchange** (longer term): inference consumers obtain short-lived JWTs from the same OIDC provider configured for admin login. Manager validates the JWT on each request. Eliminates static keys entirely.
+
+Both paths keep `CLUSTER_API_KEY` as a legacy fallback during migration, marked deprecated.
+
+---
+
+### Full Signed & Encrypted Communication
+
+**Goal**: end-to-end security so that even a compromised TLS terminator (e.g., a reverse proxy with a MITM cert) cannot read work units, inject results, or impersonate workers.
+
+#### Current state
+
+| Layer | What exists | Gap |
+|---|---|---|
+| Transport | TLS (required) | hop-level only — terminator sees plaintext |
+| Worker auth | `CLUSTER_WORKER_KEY` shared secret | replaced by challenge-response (see above) |
+| Result signing | Ed25519 signatures on results | signatures transmitted but **not yet verified** by manager |
+| Payload encryption | none below TLS | work units readable by any TLS terminator |
+
+#### Target architecture
+
+**Step 1 — Verify existing result signatures** (quick win)
+
+The worker already signs every result payload:
+```
+sig = Ed25519.Sign(private_key, canonical(id + output + processing_time_ms))
+```
+The manager receives the signature but currently ignores it. Adding verification:
+```go
+Ed25519.Verify(worker.PublicKey, canonical(result), result.Signature)
+```
+rejects tampered results immediately and gives meaningful security guarantees within the existing protocol.
+
+**Step 2 — Session key agreement (X25519 ECDH)**
+
+After the challenge-response handshake, both parties derive an ephemeral symmetric session key with forward secrecy:
+
+```
+sessionKey = HKDF-SHA256(
+  ECDH(manager_ephemeral_privkey, worker_ephemeral_pubkey),
+  salt = handshake_transcript,
+  info = "synergia-session-v1"
+)
+```
+
+Each connection generates fresh ephemeral keypairs. Compromise of long-term keys does not expose past sessions.
+
+**Step 3 — Message-level encryption (AES-256-GCM)**
+
+Work units and results are encrypted with the session key:
+
+```
+ciphertext = AES-256-GCM.Seal(
+  plaintext = json(work_unit),
+  key = sessionKey,
+  nonce = counter || random  // monotonic counter prevents nonce reuse
+)
+```
+
+The WebSocket frame carries the ciphertext. The manager cannot forward the work unit in plaintext to a third party. Results are encrypted in the opposite direction.
+
+**Step 4 — Noise Protocol composition (optional, recommended)**
+
+Instead of assembling these primitives by hand, the [Noise Protocol Framework](https://noiseprotocol.org/) provides a composable, audited specification. The `XX` pattern is the natural fit once both sides have long-term static keys:
+
+```
+XX:
+  -> e                         (client sends ephemeral pubkey)
+  <- e, ee, s, es              (manager responds; both derive shared secret using ephemeral + static ECDH)
+  -> s, se                     (client reveals its static key; mutual authentication complete)
+```
+
+`XX` provides:
+- **Mutual authentication** (both sides prove ownership of their long-term keypair)
+- **Forward secrecy** (ephemeral ECDH per session)
+- **Identity hiding** (static keys are encrypted in flight — a passive observer sees only ephemeral keys)
+
+Go library: [`github.com/flynn/noise`](https://github.com/flynn/noise) (actively maintained, audited by NCC Group).
+
+#### Proposed migration plan
+
+| Phase | Change | Removes |
+|---|---|---|
+| 2a | Verify Ed25519 result signatures in manager | — (additive) |
+| 2b | Challenge-response handshake (TOFU) | `CLUSTER_WORKER_KEY` requirement |
+| 2c | Named API keys in admin UI | `CLUSTER_API_KEY` single shared secret |
+| 3a | X25519 session key derivation post-handshake | — (additive) |
+| 3b | AES-256-GCM work unit + result encryption | plaintext exposure at TLS terminators |
+| 3c | Noise `XX` refactor (optional consolidation) | hand-rolled crypto glue |
+
+---
+
+### Signed Local Configuration
+
+**Goal**: use the worker's existing Ed25519 private key to protect configuration files on disk and to prove authorship when syncing them to the manager.
+
+#### Local tamper detection
+
+Config files (`consent.json`, `config.json`) are signed at write time and verified at read time:
+
+```
+signature = Ed25519.Sign(private_key, canonical(file_content + timestamp))
+```
+
+Written alongside the file (e.g., `consent.json.sig`). On every read, the client verifies the signature before trusting the content. A malicious process that modifies consent state or preferred role on disk fails verification — the client refuses to use the tampered data and prompts the user.
+
+#### Consent non-repudiation
+
+When consent is synced to the manager (`POST /v1/consent`), the payload is signed with the worker's private key:
+
+```
+POST /v1/consent
+Body: { accepted: true, hardware_stats: true, ... }
+Header: X-Worker-Signature: base64(Ed25519.Sign(privkey, canonical(body)))
+```
+
+The manager verifies the signature against the worker's registered public key before storing the consent record. This proves the *holder of the private key* accepted the terms — not just someone who knows the fingerprint. The signed record stored in the DB constitutes cryptographic non-repudiation: the worker cannot later claim someone else accepted on its behalf.
+
+The same pattern applies to `POST /v1/worker-config` — role preference changes are signed, preventing a rogue process from silently changing a worker's role via the API.
+
+---
+
+### Pinned Manager Public Key (SSH-style TOFU)
+
+**Goal**: mutual authentication — the challenge-response proves the worker's identity to the manager, but the worker also needs to verify it is talking to the *real* manager and not a MITM.
+
+On first successful connection, the client stores the manager's long-term Ed25519 public key alongside its own identity:
+
+```
+~/.synergia/worker/
+├── manager.pub    # Manager's public key, pinned on first connect
+└── ...
+```
+
+On every subsequent connection, before signing the challenge, the client verifies that the manager's advertised public key matches the pinned one. A mismatch causes the client to refuse connection and log a clear warning:
+
+```
+ERROR  manager public key changed — possible MITM or key rotation
+       pinned: a1b2c3...  received: d4e5f6...
+       Delete ~/.synergia/worker/manager.pub to re-pin (only do this if you trust the new key)
+```
+
+Legitimate key rotation (e.g., after a manager redeployment) requires the operator to notify workers explicitly, or workers to re-pin manually. The model is identical to SSH `known_hosts` — simple, well-understood, and sufficient for the threat model.
+
+---
+
+### Signed Manager → Worker Pushes
+
+**Goal**: workers verify that model updates, binary updates, and backend updates originate from the legitimate manager — not a MITM, a compromised relay, or a replayed old message.
+
+The manager signs the *content* of every push message with its long-term Ed25519 private key:
+
+```jsonc
+// model_update (signed)
+{
+  "type": "model_update",
+  "role": "embedding",
+  "filename": "SmolLM2-135M-Q4_K_M.gguf",
+  "expected_hash": "sha256:abc123...",
+  "signature": "base64(Ed25519.Sign(manager_privkey,
+                  canonical(type + role + filename + expected_hash + timestamp)))"
+}
+```
+
+Workers verify the signature against the pinned manager public key before applying any update. A failed verification causes the worker to reject the push, log the anomaly, and send an error report to the manager.
+
+The `timestamp` field (Unix seconds, included in the signed payload) prevents replay attacks — workers reject messages with a timestamp more than N seconds in the past (e.g., 30s). This eliminates the window for replaying a legitimate-but-stale update push.
+
+---
+
+### Operator-Signed Release Artifacts
+
+**Goal**: decouple update integrity from the manager's trustworthiness. Even if the manager is compromised, it cannot trick workers into installing a malicious binary.
+
+The current model has a single trust chain:
+```
+operator trusts manager → manager provides SHA256 → worker trusts SHA256
+```
+If the manager is compromised, it provides a malicious SHA256 for a malicious binary.
+
+The stronger model introduces an **offline operator signing key**:
+
+```
+operator offline key → signs manifest → manifest ships with release
+worker verifies manifest signature → trusts SHA256 in manifest → verifies binary
+```
+
+**At release time** (operator's machine, air-gapped if needed):
+```
+manifest.json = { "version": "v1.2.3", "artifacts": [ { "os": "linux", "arch": "amd64", "sha256": "..." }, ... ] }
+manifest.sig  = Ed25519.Sign(operator_privkey, manifest.json)
+```
+
+Both files ship alongside the release binary (e.g., as GitHub release assets).
+
+**At install time**, the operator's public key is patched into the binary alongside the manager URL sentinel — a second sentinel placeholder, replaced at distribution time. Workers carry the operator key at the binary level, independent of the manager.
+
+**At update time**, the worker:
+1. Downloads the manifest and its signature from the manager proxy (or directly from GitHub)
+2. Verifies `manifest.sig` against the pinned operator public key
+3. Extracts the SHA256 for its platform from the verified manifest
+4. Downloads the binary and verifies its hash
+
+The manager becomes a **transport only** — it cannot forge a valid artifact hash without the operator's offline private key.
+
+---
+
+### Work Unit Provenance and Chain of Custody
+
+**Goal**: create a tamper-evident audit trail for every inference — proving which manager issued a unit, which worker processed it, and that the result was not modified in transit.
+
+This builds on signed pushes (manager signs work units) and result signing (worker signs results, already partially implemented):
+
+```
+Manager signs work unit:
+  wu.signature = Ed25519.Sign(manager_privkey, canonical(wu.id + wu.messages + wu.params))
+
+Worker verifies before processing:
+  Ed25519.Verify(manager_pubkey, canonical(wu), wu.signature)
+  → rejects units with invalid or missing signature (prevents injection)
+
+Worker signs result:
+  result.signature = Ed25519.Sign(worker_privkey, canonical(wu.id + result.output + latency_ms))
+  [already transmitted — verification in manager not yet implemented]
+
+Manager verifies result:
+  Ed25519.Verify(worker.registered_pubkey, canonical(result), result.signature)
+  → rejects tampered results before returning to caller
+```
+
+The stored `work_units` row gains two columns: `manager_signature` (proves the unit was legitimately issued) and `worker_signature` (proves the result was produced by the authenticated worker). Together they form a **chain of custody** for each inference:
+
+- The calling application can verify the result came from the cluster (manager signature on the work unit proves issuance; worker signature proves execution)
+- Disputes about a result can be settled cryptographically — neither the manager nor the worker can unilaterally forge the other's signature
+- Malicious prompt injection that successfully executes is attributable (the signed work unit proves it came from the manager's queue, not a rogue actor)
+
+The exposed API response can optionally include both signatures, allowing the caller to independently verify the chain without trusting the manager's word.
+
 ## Project Structure
 
 ```

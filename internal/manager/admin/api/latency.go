@@ -1,4 +1,4 @@
-package api
+package adminapi
 
 import (
 	"encoding/json"
@@ -10,26 +10,18 @@ import (
 
 // LatencyAPI handles admin endpoints for latency monitoring.
 type LatencyAPI struct {
-	apiKey  string
 	monitor *latency.Monitor
 }
 
 // NewLatencyAPI creates a new latency admin API handler.
-func NewLatencyAPI(apiKey string, monitor *latency.Monitor) *LatencyAPI {
-	return &LatencyAPI{
-		apiKey:  apiKey,
-		monitor: monitor,
-	}
+func NewLatencyAPI(monitor *latency.Monitor) *LatencyAPI {
+	return &LatencyAPI{monitor: monitor}
 }
 
 // LatencyHandler serves GET /v1/latency — returns the latency matrix.
 func (a *LatencyAPI) LatencyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !a.authenticateAdmin(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -54,11 +46,6 @@ func (a *LatencyAPI) LatencyHandler(w http.ResponseWriter, r *http.Request) {
 
 // ConfigHandler serves GET/POST /v1/latency/config.
 func (a *LatencyAPI) ConfigHandler(w http.ResponseWriter, r *http.Request) {
-	if !a.authenticateAdmin(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
 	switch r.Method {
 	case http.MethodGet:
 		cfg := a.monitor.GetConfig()
@@ -79,13 +66,4 @@ func (a *LatencyAPI) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-func (a *LatencyAPI) authenticateAdmin(r *http.Request) bool {
-	auth := r.Header.Get("Authorization")
-	if auth == "Bearer "+a.apiKey {
-		return true
-	}
-	apiKey := r.Header.Get("X-API-Key")
-	return apiKey == a.apiKey
 }

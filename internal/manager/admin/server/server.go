@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/ylallemant/synergia/internal/manager/acme"
+	"github.com/ylallemant/synergia/internal/manager/admin/auth"
 	"github.com/ylallemant/synergia/internal/manager/cache"
 	"github.com/ylallemant/synergia/internal/manager/store"
 )
@@ -18,32 +19,33 @@ import (
 var staticFS embed.FS
 
 var dashboardTmpl = template.Must(template.ParseFS(staticFS, "static/index.html"))
+var oidcTmpl = template.Must(template.ParseFS(staticFS, "static/oidc.html"))
 
 // Server serves the admin dashboard and additional admin API routes.
 type Server struct {
 	addr        string
 	apiKey      string
-	workerKey   string
 	store       *store.Store
 	cache       *cache.Cache
 	insecure    bool
 	tlsCertFile string
 	tlsKeyFile  string
+	auth        *auth.Auth
 	mux         *http.ServeMux
 	server      *http.Server
 }
 
 // New creates a new admin dashboard server.
-func New(addr, apiKey, workerKey string, s *store.Store, c *cache.Cache, insecure bool, tlsCertFile, tlsKeyFile string) *Server {
+func New(addr, apiKey string, s *store.Store, c *cache.Cache, insecure bool, tlsCertFile, tlsKeyFile string, a *auth.Auth) *Server {
 	srv := &Server{
 		addr:        addr,
 		apiKey:      apiKey,
-		workerKey:   workerKey,
 		store:       s,
 		cache:       c,
 		insecure:    insecure,
 		tlsCertFile: tlsCertFile,
 		tlsKeyFile:  tlsKeyFile,
+		auth:        a,
 		mux:         http.NewServeMux(),
 	}
 
@@ -58,8 +60,17 @@ func New(addr, apiKey, workerKey string, s *store.Store, c *cache.Cache, insecur
 	staticSub, _ := fs.Sub(staticFS, "static")
 	srv.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
 
-	// Dashboard handler
-	srv.mux.HandleFunc("/", srv.dashboardHandler)
+	// Auth routes
+	srv.mux.HandleFunc("/login", srv.auth.LoginHandler)
+	srv.mux.HandleFunc("/logout", srv.auth.LogoutHandler)
+	if srv.auth.Config.OIDCEnabled {
+		srv.mux.HandleFunc("/auth/oidc/login", srv.auth.OIDCLoginHandler)
+		srv.mux.HandleFunc("/auth/oidc/callback", srv.auth.OIDCCallbackHandler)
+	}
+
+	// Dashboard and OIDC settings page
+	srv.mux.HandleFunc("/", srv.auth.RequireAuth(srv.dashboardHandler))
+	srv.mux.HandleFunc("/admin/oidc", srv.auth.RequireAuth(srv.oidcHandler))
 
 	return srv
 }
@@ -67,6 +78,13 @@ func New(addr, apiKey, workerKey string, s *store.Store, c *cache.Cache, insecur
 // HandleFunc registers an additional handler on the admin mux.
 func (s *Server) HandleFunc(pattern string, handler http.HandlerFunc) {
 	s.mux.HandleFunc(pattern, handler)
+}
+
+// HandleFuncAdmin registers a handler on the admin mux protected by session or
+// Bearer token. Browser logins use the session cookie; automated / test access
+// uses Authorization: Bearer <apiKey>.
+func (s *Server) HandleFuncAdmin(pattern string, handler http.HandlerFunc) {
+	s.mux.HandleFunc(pattern, s.auth.RequireAuthOrBearer(s.apiKey, handler))
 }
 
 // Run starts the admin server. Blocks until ctx is cancelled.
@@ -98,14 +116,27 @@ func (s *Server) Run(ctx context.Context) {
 	}
 }
 
-// dashboardHandler serves GET / on the admin port.
-func (s *Server) dashboardHandler(w http.ResponseWriter, r *http.Request) {
+type oidcPageData struct {
+	APIKey string
+}
+
+// oidcHandler serves GET /admin/oidc — the OIDC settings page.
+func (s *Server) oidcHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.authenticate(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	data := oidcPageData{APIKey: s.apiKey}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := oidcTmpl.Execute(w, data); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
+}
+
+// dashboardHandler serves GET / on the admin port.
+func (s *Server) dashboardHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -115,20 +146,6 @@ func (s *Server) dashboardHandler(w http.ResponseWriter, r *http.Request) {
 	if err := dashboardTmpl.Execute(w, data); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
-}
-
-func (s *Server) authenticate(r *http.Request) bool {
-	if key := r.Header.Get("X-API-Key"); key == s.apiKey || key == s.workerKey {
-		return true
-	}
-	if auth := r.Header.Get("Authorization"); auth == "Bearer "+s.apiKey || auth == "Bearer "+s.workerKey {
-		return true
-	}
-	// Allow query param for browser access
-	if key := r.URL.Query().Get("key"); key == s.apiKey || key == s.workerKey {
-		return true
-	}
-	return false
 }
 
 func (s *Server) collectData() dashboardData {
