@@ -24,6 +24,9 @@ var installScriptFS embed.FS
 
 var downloadTmpl = template.Must(template.ParseFS(downloadPageFS, "public/download.html"))
 
+// Sentinel constants for binary patching.
+// The client binary contains a placeholder string of this form,
+// which we replace at runtime with the actual manager URL.
 const sentinelValue = "$$SYNERGIA_MANAGER_URL$$"
 const sentinelSize = 256
 
