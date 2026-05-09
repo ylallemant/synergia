@@ -954,8 +954,8 @@ Security improvements for the container image and Kubernetes deployment. The ite
 |---|---|
 | Statically linked binary | `CGO_ENABLED=0` — no libc dependency |
 | Stripped binary | `-ldflags="-s -w"` — no debug symbols or DWARF |
-| Distroless final image | `gcr.io/distroless/static-debian12:nonroot` — no shell, no curl, no package manager, CA certs included |
-| Non-root process | Distroless `:nonroot` runs as uid 65532 by default |
+| Minimal final image | `alpine:3.20` + `ca-certificates` only — `curl` removed (was present before, not needed at runtime) |
+| Non-root process | `USER nobody:nobody` (Alpine uid 65534) |
 | Ports declared | `EXPOSE 7500 7501` |
 
 #### TODO: read-only root filesystem
