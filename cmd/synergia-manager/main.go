@@ -302,6 +302,8 @@ func main() {
 	adminServer.HandleFuncAdmin("/v1/admin/oidc", adminOIDCAPI.ConfigHandler)
 	adminWorkersAPI := adminapi.NewAdminWorkersAPI(db)
 	adminServer.HandleFuncAdmin("/v1/admin/workers", adminWorkersAPI.ConfigHandler)
+	adminStatsAPI := adminapi.NewAdminStatsAPI(adminCache)
+	adminServer.HandleFuncAdmin("/v1/admin/stats", adminStatsAPI.StatsHandler)
 
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

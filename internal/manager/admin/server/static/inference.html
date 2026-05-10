@@ -56,9 +56,14 @@
       <span id="backendStatus" class="status-msg"></span>
     </div>
   </form>
-  <div id="backendSyncGrid" class="grid sync-grid" style="display:none">
-    <div class="card"><div class="label">Synced</div><div class="value green" id="beSynced">—</div></div>
-    <div class="card"><div class="label">Out of Sync</div><div class="value yellow" id="beOutdated">—</div></div>
+  <div id="backendSyncSection" style="margin-top:0.75rem">
+    <div id="backendSyncNoTarget" class="notice notice-info" style="display:none">
+      No target backend version configured — set one above to start tracking worker sync.
+    </div>
+    <div id="backendSyncGrid" class="grid sync-grid" style="display:none">
+      <div class="card"><div class="label">Synced</div><div class="value green" id="beSynced">0</div></div>
+      <div class="card"><div class="label">Out of Sync</div><div class="value yellow" id="beOutdated">0</div></div>
+    </div>
   </div>
 </div>
 
@@ -123,6 +128,24 @@ async function loadBackendConfig() {
   } catch(e) { console.error("Failed to load backend config:", e); }
 }
 loadBackendConfig();
+
+async function loadSyncStats() {
+  try {
+    const resp = await fetch("/v1/admin/stats", {headers});
+    if (!resp.ok) return;
+    const s = await resp.json();
+    if (s.backend_version) {
+      document.getElementById("backendSyncGrid").style.display = "";
+      document.getElementById("backendSyncNoTarget").style.display = "none";
+      document.getElementById("beSynced").textContent = s.backend_synced;
+      document.getElementById("beOutdated").textContent = s.backend_outdated;
+    } else {
+      document.getElementById("backendSyncGrid").style.display = "none";
+      document.getElementById("backendSyncNoTarget").style.display = "";
+    }
+  } catch(e) { console.error("Failed to load sync stats:", e); }
+}
+loadSyncStats();
 
 async function refreshBackendTags() {
   const name = document.getElementById("be_name").value;

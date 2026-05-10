@@ -100,9 +100,14 @@
       <span id="versionStatus" class="status-msg"></span>
     </div>
   </form>
-  <div id="versionSyncGrid" class="grid sync-grid" style="display:none">
-    <div class="card"><div class="label">Synced</div><div class="value green" id="verSynced">—</div></div>
-    <div class="card"><div class="label">Out of Sync</div><div class="value yellow" id="verOutdated">—</div></div>
+  <div id="versionSyncSection" style="margin-top:0.75rem">
+    <div id="versionSyncNoTarget" class="notice notice-info" style="display:none">
+      No target version configured — set one above and push to start tracking client sync.
+    </div>
+    <div id="versionSyncGrid" class="grid sync-grid" style="display:none">
+      <div class="card"><div class="label">Synced</div><div class="value green" id="verSynced">0</div></div>
+      <div class="card"><div class="label">Out of Sync</div><div class="value yellow" id="verOutdated">0</div></div>
+    </div>
   </div>
 </div>
 
@@ -190,6 +195,24 @@ async function loadVersionConfig() {
   } catch(e) { console.error("Failed to load version config:", e); }
 }
 loadVersionConfig();
+
+async function loadSyncStats() {
+  try {
+    const resp = await fetch("/v1/admin/stats", {headers});
+    if (!resp.ok) return;
+    const s = await resp.json();
+    if (s.version_target) {
+      document.getElementById("versionSyncGrid").style.display = "";
+      document.getElementById("versionSyncNoTarget").style.display = "none";
+      document.getElementById("verSynced").textContent = s.workers_synced;
+      document.getElementById("verOutdated").textContent = s.workers_outdated;
+    } else {
+      document.getElementById("versionSyncGrid").style.display = "none";
+      document.getElementById("versionSyncNoTarget").style.display = "";
+    }
+  } catch(e) { console.error("Failed to load sync stats:", e); }
+}
+loadSyncStats();
 
 async function refreshClientTags() {
   const btn = document.getElementById("refreshClientTagsBtn");
