@@ -215,10 +215,10 @@ async function loadRoles() {
       return;
     }
     tbody.innerHTML = roles.map(r => `<tr>
-      <td>${r.role}</td><td>${r.model || ""}</td><td>${r.quantisation || ""}</td>
-      <td class="mono">${r.filename || ""}</td><td>${r.min_vram_mb}</td>
-      <td>${r.description || ""}</td>
-      <td><button class="btn-small btn-delete" onclick="deleteRole('${r.role}')">&#x2715;</button></td>
+      <td>${r.Role}</td><td>${r.LLMModel || ""}</td><td>${r.Quantisation || ""}</td>
+      <td class="mono">${r.ModelFilename || ""}</td><td>${r.MinVRAMMB}</td>
+      <td>${r.Description || ""}</td>
+      <td><button class="btn-small btn-delete" onclick="deleteRole('${r.Role}')">&#x2715;</button></td>
     </tr>`).join("");
   } catch(e) { console.error("Failed to load roles:", e); }
 }
