@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/binary"
 	"fmt"
 	"html/template"
 	"io"
@@ -164,6 +166,8 @@ func (d *DownloadAPI) InstallHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // patchSentinel replaces the sentinel placeholder in the binary with the actual manager URL.
+// For darwin/arm64 Mach-O binaries it also recomputes the ad-hoc code signature so
+// macOS does not SIGKILL the binary on first execution.
 func patchSentinel(data []byte, managerURL string) ([]byte, error) {
 	sentinelText := []byte(sentinelValue)
 
@@ -172,12 +176,10 @@ func patchSentinel(data []byte, managerURL string) ([]byte, error) {
 		return nil, fmt.Errorf("sentinel not found in binary")
 	}
 
-	// Ensure there's enough room for the full sentinel region
 	if idx+sentinelSize > len(data) {
 		return nil, fmt.Errorf("sentinel found too close to end of binary")
 	}
 
-	// Build replacement: URL + null padding to sentinelSize
 	if len(managerURL) >= sentinelSize {
 		return nil, fmt.Errorf("manager URL too long (%d bytes, max %d)", len(managerURL), sentinelSize-1)
 	}
@@ -188,12 +190,101 @@ func patchSentinel(data []byte, managerURL string) ([]byte, error) {
 	copy(result, data)
 	copy(result[idx:idx+sentinelSize], replacement)
 
-	// Verify no second occurrence
 	if bytes.Index(result[idx+sentinelSize:], sentinelText) != -1 {
 		return nil, fmt.Errorf("multiple sentinels found in binary")
 	}
 
+	// Recompute the Mach-O ad-hoc code signature so patched darwin/arm64
+	// binaries pass macOS signature verification and are not SIGKILL-ed.
+	recomputeAdHocSignature(result)
+
 	return result, nil
+}
+
+// recomputeAdHocSignature updates the page hashes in a Mach-O ad-hoc code
+// signature after the binary has been modified. Go embeds a code signature
+// that SHA-256 hashes every 4 KB page from offset 0 to the start of
+// __LINKEDIT; patching any byte in that range invalidates the signature.
+// This function recomputes only the affected hashes in-place — the structure
+// size is unchanged so the result fits in the original __LINKEDIT slot.
+func recomputeAdHocSignature(data []byte) {
+	if len(data) < 32 {
+		return
+	}
+	// Only 64-bit little-endian Mach-O (darwin arm64 / amd64)
+	if binary.LittleEndian.Uint32(data[0:]) != 0xfeedfacf {
+		return
+	}
+
+	ncmds := binary.LittleEndian.Uint32(data[16:])
+	off := uint32(32) // sizeof(mach_header_64)
+	var csOff, csSize uint32
+	for i := uint32(0); i < ncmds; i++ {
+		cmd := binary.LittleEndian.Uint32(data[off:])
+		cmdsize := binary.LittleEndian.Uint32(data[off+4:])
+		if cmd == 0x1d { // LC_CODE_SIGNATURE
+			csOff = binary.LittleEndian.Uint32(data[off+8:])
+			csSize = binary.LittleEndian.Uint32(data[off+12:])
+		}
+		off += cmdsize
+	}
+	if csOff == 0 || int(csOff+csSize) > len(data) {
+		return
+	}
+
+	cs := data[csOff : csOff+csSize]
+	if binary.BigEndian.Uint32(cs[0:]) != 0xfade0cc0 { // CS_MAGIC_EMBEDDED_SIGNATURE
+		return
+	}
+	count := binary.BigEndian.Uint32(cs[8:])
+
+	// Find the CodeDirectory blob (blob type 0)
+	var cdOff uint32
+	for i := uint32(0); i < count; i++ {
+		btype := binary.BigEndian.Uint32(cs[12+i*8:])
+		boff := binary.BigEndian.Uint32(cs[16+i*8:])
+		if btype == 0 {
+			cdOff = boff
+			break
+		}
+	}
+	if cdOff == 0 || int(cdOff+44) > len(cs) {
+		return
+	}
+
+	// CS_CodeDirectory offsets (all big-endian):
+	//   16: hashOffset  (uint32) — byte offset from CD start to hash slot 0
+	//   28: nCodeSlots  (uint32)
+	//   32: codeLimit   (uint32) — last byte covered by page hashes
+	//   36: hashSize    (uint8)
+	//   39: pageSize    (uint8)  — log2(page size in bytes)
+	cd := cs[cdOff:]
+	hashOffset := binary.BigEndian.Uint32(cd[16:])
+	nCode := binary.BigEndian.Uint32(cd[28:])
+	codeLimit := binary.BigEndian.Uint32(cd[32:])
+	hashSize := uint32(cd[36])
+	pageSize := uint32(1) << cd[39]
+
+	if hashSize == 0 || pageSize == 0 || nCode == 0 {
+		return
+	}
+
+	for i := uint32(0); i < nCode; i++ {
+		start := i * pageSize
+		end := start + pageSize
+		if end > codeLimit {
+			end = codeLimit
+		}
+		if int(end) > len(data) {
+			break
+		}
+		h := sha256.Sum256(data[start:end])
+		slotBase := cdOff + hashOffset + i*hashSize
+		if int(slotBase)+int(hashSize) > len(cs) {
+			break
+		}
+		copy(cs[slotBase:slotBase+hashSize], h[:hashSize])
+	}
 }
 
 // loadBinary tries to load the binary from (in order):
