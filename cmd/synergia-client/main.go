@@ -67,6 +67,14 @@ func initLogger() {
 }
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "--version", "-version":
+			fmt.Printf("synergia-client %s (commit: %s)\n", version.Version, version.Commit)
+			os.Exit(0)
+		}
+	}
+
 	initLogger()
 
 	// Top-level panic recovery — report to manager if possible, then re-panic

@@ -191,34 +191,44 @@ func patchSentinel(data []byte, managerURL string) ([]byte, error) {
 
 // loadBinary tries to load the binary from (in order):
 // 1. Local binaryDir (pre-built binaries placed by make client-binaries)
-// 2. Local cacheDir (previously fetched from GitHub)
+// 2. Version-aware cache (previously fetched from GitHub for this exact version)
 // 3. GitHub releases (fetched and cached for future use)
+//
+// The cache path includes the version so stale binaries from older releases are
+// naturally bypassed when the target version advances. The startup version-change
+// check in main.go removes the entire cache dir when the manager itself upgrades,
+// so there is no need to manually prune old version subdirectories.
 func (d *DownloadAPI) loadBinary(filename, targetOS, targetArch string) ([]byte, error) {
-	// 1. Check local binary dir
+	// 1. Operator-supplied prebuilt binaries (no version check)
 	localPath := filepath.Join(d.binaryDir, filename)
 	if data, err := os.ReadFile(localPath); err == nil {
 		return data, nil
 	}
 
-	// 2. Check cache dir
-	cachedPath := filepath.Join(d.cacheDir, "client-binaries", filename)
-	if data, err := os.ReadFile(cachedPath); err == nil {
-		return data, nil
-	}
-
-	// 3. Fetch from GitHub releases
+	// 2. Determine target version before checking the cache
 	version := d.cache.GetStats().VersionTarget
 	if version == "" {
-		// Try to get the latest tag
-		tags := d.cache.GetClientTags()
-		if len(tags) > 0 {
+		if tags := d.cache.GetClientTags(); len(tags) > 0 {
 			version = tags[0]
 		}
 	}
 	if version == "" {
-		return nil, fmt.Errorf("no version available to fetch binary from GitHub")
+		// Tags not yet in cache — fetch directly from GitHub as a last resort
+		if tags, err := d.cache.RefreshClientTags(); err == nil && len(tags) > 0 {
+			version = tags[0]
+		}
+	}
+	if version == "" {
+		return nil, fmt.Errorf("no version configured and GitHub release list unavailable")
 	}
 
+	// 3. Version-aware cache: each version has its own subdirectory
+	cachedPath := filepath.Join(d.cacheDir, "client-binaries", version, filename)
+	if data, err := os.ReadFile(cachedPath); err == nil {
+		return data, nil
+	}
+
+	// 4. Fetch from GitHub and cache for future requests
 	url := buildDownloadURL(version, targetOS, targetArch)
 	log.Info().Str("url", url).Str("filename", filename).Msg("fetching client binary from GitHub")
 
@@ -237,13 +247,13 @@ func (d *DownloadAPI) loadBinary(filename, targetOS, targetArch string) ([]byte,
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Cache for future requests
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	cacheDir := filepath.Join(d.cacheDir, "client-binaries")
-	os.MkdirAll(cacheDir, 0o755)
-	if err := os.WriteFile(cachedPath, data, 0o755); err != nil {
-		log.Warn().Err(err).Str("path", cachedPath).Msg("failed to cache binary")
+	versionCacheDir := filepath.Join(d.cacheDir, "client-binaries", version)
+	if err := os.MkdirAll(versionCacheDir, 0o755); err == nil {
+		if writeErr := os.WriteFile(cachedPath, data, 0o755); writeErr != nil {
+			log.Warn().Err(writeErr).Str("path", cachedPath).Msg("failed to cache binary")
+		}
 	}
 
 	return data, nil

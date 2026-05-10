@@ -74,7 +74,9 @@ jobs:
           CGO_ENABLED: ${{ matrix.cgo }}
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          LDFLAGS="-s -w -X github.com/ylallemant/synergia/internal/client/version.Version=${VERSION}"
+          COMMIT="${GITHUB_SHA::8}"
+          PKG="github.com/ylallemant/synergia/internal/client/version"
+          LDFLAGS="-s -w -X ${PKG}.Version=${VERSION} -X ${PKG}.Commit=${COMMIT}"
           TAGS="${{ matrix.tags }}"
           if [ -n "$TAGS" ]; then
             go build -tags "$TAGS" -ldflags="${LDFLAGS}" -o dist/${{ matrix.artifact }} ./cmd/synergia-client
@@ -148,7 +150,8 @@ jobs:
       - name: Build binaries
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          LDFLAGS="-s -w"
+          COMMIT="${GITHUB_SHA::8}"
+          LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}"
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="${LDFLAGS}" -o dist/synergia-manager-linux-amd64 ./cmd/synergia-manager
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="${LDFLAGS}" -o dist/synergia-manager-linux-arm64 ./cmd/synergia-manager
 
@@ -192,5 +195,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -53,7 +53,21 @@ func initLogger() {
 	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
 }
 
+// version and commit are set at build time via -ldflags:
+//   -X main.version=x.y.z  -X main.commit=abc1234
+// version is also persisted to the DB; a change triggers a binary-cache purge.
+var version = "dev"
+var commit  = "unknown"
+
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "--version", "-version":
+			fmt.Printf("synergia-manager %s (commit: %s)\n", version, commit)
+			os.Exit(0)
+		}
+	}
+
 	initLogger()
 
 	// Parse CLI flags
@@ -78,6 +92,10 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("database error")
 	}
+
+	// Purge binary download cache when the manager version changes so workers
+	// always receive a freshly-patched binary that matches the current code.
+	checkAndPurgeStaleCache(db, cfg.CacheDir)
 
 	// Seed role-model mappings
 	if cfg.TestSetup {
@@ -364,4 +382,27 @@ func main() {
 	}
 
 	log.Info().Msg("cluster manager stopped")
+}
+
+// checkAndPurgeStaleCache compares the running manager version against the
+// last-seen version stored in the DB. On a version change (including first
+// start), the client-binary download cache is purged so workers always receive
+// a freshly-patched binary that matches the current sentinel format.
+func checkAndPurgeStaleCache(s *store.Store, cacheDir string) {
+	prev, _ := s.GetSetting("manager_version")
+	if prev == version {
+		return
+	}
+	if prev != "" {
+		log.Info().Str("prev", prev).Str("current", version).Msg("manager version changed — purging binary download cache")
+	} else {
+		log.Debug().Str("version", version).Msg("first start — initialising manager version in DB")
+	}
+	binCacheDir := filepath.Join(cacheDir, "client-binaries")
+	if err := os.RemoveAll(binCacheDir); err != nil {
+		log.Warn().Err(err).Str("dir", binCacheDir).Msg("failed to purge binary download cache")
+	}
+	if err := s.SetSetting("manager_version", version); err != nil {
+		log.Warn().Err(err).Msg("failed to persist manager version")
+	}
 }

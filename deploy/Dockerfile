@@ -7,7 +7,14 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /synergia-manager ./cmd/synergia-manager
+
+# BUILD_VERSION and BUILD_COMMIT are injected by the CI pipeline.
+# Fall back to "dev" / "unknown" for local builds.
+ARG BUILD_VERSION=dev
+ARG BUILD_COMMIT=unknown
+RUN CGO_ENABLED=0 go build \
+      -ldflags="-s -w -X main.version=${BUILD_VERSION} -X main.commit=${BUILD_COMMIT}" \
+      -o /synergia-manager ./cmd/synergia-manager
 
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 

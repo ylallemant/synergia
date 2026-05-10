@@ -9,24 +9,37 @@ import (
 	"time"
 )
 
-// DefaultManagerURL is a fixed-size sentinel replaced at binary distribution time.
-// The manager's download endpoint patches this with the real WSS URL (null-padded to 256 bytes).
-// If still set to the sentinel (or empty), the client starts in unconfigured mode.
-var DefaultManagerURL = buildDefaultManagerURL()
+// DefaultManagerURL is a fixed 256-byte slot in the binary's read-only data.
+// The manager's download endpoint patches this slot at distribution time with
+// the real WSS URL, null-padded to fill all 256 bytes.
+//
+// IMPORTANT: the sentinel text must appear exactly once in this binary.
+// Do NOT compare against it using a string literal elsewhere — use
+// defaultManagerURLSentinel() which returns a substring of DefaultManagerURL
+// (a slice header, not a new copy in rodata).
+var DefaultManagerURL = "$$SYNERGIA_MANAGER_URL$$" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00"
 
 const defaultManagerURLSentinelSize = 256
+const defaultManagerURLSentinelLen  = 24 // len("$$SYNERGIA_MANAGER_URL$$")
 
-var defaultManagerURLSentinelBytes = []byte{
-	'$', '$', 'S', 'Y', 'N', 'E', 'R', 'G', 'I', 'A', '_', 'M', 'A', 'N', 'A', 'G', 'E', 'R', '_', 'U', 'R', 'L', '$', '$',
-}
-
-func defaultManagerURLSentinel() string { return string(defaultManagerURLSentinelBytes) }
-
-func buildDefaultManagerURL() string {
-	data := make([]byte, defaultManagerURLSentinelSize)
-	copy(data, defaultManagerURLSentinelBytes)
-	return string(data)
-}
+// defaultManagerURLSentinel returns the sentinel text as a substring of
+// DefaultManagerURL — no second copy of the bytes in rodata.
+func defaultManagerURLSentinel() string { return DefaultManagerURL[:defaultManagerURLSentinelLen] }
 
 func resolveManagerURL() string {
 	url := strings.TrimRight(DefaultManagerURL, "\x00")
@@ -36,31 +49,28 @@ func resolveManagerURL() string {
 	return url
 }
 
-// DefaultWorkerKey is a fixed-size sentinel replaced at binary distribution time.
-// The manager's download endpoint patches this with a Base64-encoded worker key
-// (null-padded to 96 bytes) for key-auth deployments.
-// If the sentinel is unpatched (still the placeholder or all nulls), the client
-// uses TOFU mode — no key is sent and the challenge-response handshake authenticates instead.
-var DefaultWorkerKey = buildDefaultWorkerKey()
+// DefaultWorkerKey is a fixed 96-byte slot in the binary's read-only data.
+// The manager's download endpoint can patch this slot at distribution time
+// with a Base64-encoded worker key, null-padded to 96 bytes, for key-auth
+// deployments. If unpatched (still the placeholder), the client uses TOFU mode.
+//
+// Same sentinel-uniqueness rule as DefaultManagerURL — use defaultWorkerKeySentinel().
+var DefaultWorkerKey = "$$SYNERGIA_WORKER_KEY$$" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00"
 
 const defaultWorkerKeySentinelSize = 96
+const defaultWorkerKeySentinelLen  = 23 // len("$$SYNERGIA_WORKER_KEY$$")
 
-var defaultWorkerKeySentinelBytes = []byte{
-	'$', '$', 'S', 'Y', 'N', 'E', 'R', 'G', 'I', 'A', '_', 'W', 'O', 'R', 'K', 'E', 'R', '_', 'K', 'E', 'Y', '$', '$',
-}
-
-func defaultWorkerKeySentinel() string { return string(defaultWorkerKeySentinelBytes) }
-
-func buildDefaultWorkerKey() string {
-	data := make([]byte, defaultWorkerKeySentinelSize)
-	copy(data, defaultWorkerKeySentinelBytes)
-	return string(data)
-}
+func defaultWorkerKeySentinel() string { return DefaultWorkerKey[:defaultWorkerKeySentinelLen] }
 
 // resolveWorkerKey returns the effective worker key in priority order:
 // 1. CLUSTER_WORKER_KEY env var (development / CI override)
 // 2. Base64-decoded binary sentinel (patched at distribution time by the manager)
-// 3. Empty string — TOFU mode, no key sent, challenge-response auth is used instead
+// 3. Empty string — TOFU mode, challenge-response auth is used instead
 func resolveWorkerKey() string {
 	if v := os.Getenv("CLUSTER_WORKER_KEY"); v != "" {
 		return v

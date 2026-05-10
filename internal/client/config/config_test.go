@@ -11,18 +11,17 @@ func TestDefaultManagerURLSentinel(t *testing.T) {
 		t.Fatalf("expected sentinel %q, got %q", "$$SYNERGIA_MANAGER_URL$$", sentinel)
 	}
 
-	defaultURL := buildDefaultManagerURL()
-	if len(defaultURL) != defaultManagerURLSentinelSize {
-		t.Fatalf("expected default URL length %d, got %d", defaultManagerURLSentinelSize, len(defaultURL))
+	if len(DefaultManagerURL) != defaultManagerURLSentinelSize {
+		t.Fatalf("expected default URL length %d, got %d", defaultManagerURLSentinelSize, len(DefaultManagerURL))
 	}
-	if strings.TrimRight(defaultURL, "\x00") != sentinel {
-		t.Fatalf("expected trimmed default URL to equal sentinel, got %q", strings.TrimRight(defaultURL, "\x00"))
+	if strings.TrimRight(DefaultManagerURL, "\x00") != sentinel {
+		t.Fatalf("expected trimmed default URL to equal sentinel, got %q", strings.TrimRight(DefaultManagerURL, "\x00"))
 	}
 }
 
 func TestResolveManagerURLWithUnpatchedDefault(t *testing.T) {
 	orig := DefaultManagerURL
-	DefaultManagerURL = buildDefaultManagerURL()
+	DefaultManagerURL = "$$SYNERGIA_MANAGER_URL$$" + strings.Repeat("\x00", defaultManagerURLSentinelSize-defaultManagerURLSentinelLen)
 	defer func() { DefaultManagerURL = orig }()
 
 	if got := resolveManagerURL(); got != "" {
@@ -32,7 +31,6 @@ func TestResolveManagerURLWithUnpatchedDefault(t *testing.T) {
 
 func TestResolveManagerURLWithPatchedValue(t *testing.T) {
 	orig := DefaultManagerURL
-	DefaultManagerURL = buildDefaultManagerURL()
 	defer func() { DefaultManagerURL = orig }()
 
 	patched := "wss://example.com/ws/worker"

@@ -99,6 +99,15 @@ func New(s *store.Store) *Cache {
 	}
 	// Initial stats load
 	c.refreshStats()
+	// Prefetch the latest client release tags in the background so they are
+	// available for /download/* requests immediately without a manual refresh.
+	go func() {
+		if tags, err := fetchSynergiaTags(5); err == nil && len(tags) > 0 {
+			c.mu.Lock()
+			c.clientTags = tags
+			c.mu.Unlock()
+		}
+	}()
 	return c
 }
 
