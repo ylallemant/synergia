@@ -24,6 +24,8 @@ h1{font-size:2rem;margin-bottom:.5rem}
 .copy-btn{position:absolute;top:.5rem;right:.5rem;background:#334155;border:none;color:#e2e8f0;padding:.3rem .6rem;border-radius:4px;cursor:pointer;font-size:.75rem}
 .copy-btn:hover{background:#475569}
 .unsupported{color:#f87171;background:#1e293b;border:1px solid #7f1d1d;border-radius:8px;padding:1rem;margin-top:1rem;font-size:.9rem}
+.chmod-note{margin-top:1rem;font-size:.8rem;color:#64748b}
+.chmod-note code{background:#0f172a;padding:.1rem .35rem;border-radius:3px;font-family:monospace;color:#a5b4fc}
 </style>
 </head>
 <body>
@@ -34,6 +36,10 @@ h1{font-size:2rem;margin-bottom:.5rem}
   <p class="detected" id="detected">Detecting your platform...</p>
 
   <a id="download-btn" class="btn disabled" href="#">Download</a>
+  <p class="chmod-note" id="chmod-note" style="display:none">
+    After downloading, mark it executable:<br>
+    <code id="chmod-cmd"></code>
+  </p>
 
   <div class="all-platforms">
     <button class="toggle" onclick="document.getElementById('platforms').classList.toggle('show')">Show all platforms</button>
@@ -107,6 +113,11 @@ h1{font-size:2rem;margin-bottom:.5rem}
       btn.textContent = 'Download for ' + label;
       btn.href = '/download/' + os + '/' + arch;
       btn.classList.remove('disabled');
+      if (os !== 'windows') {
+        const filename = 'synergia-client-' + os + '-' + arch;
+        document.getElementById('chmod-cmd').textContent = 'chmod +x ' + filename;
+        document.getElementById('chmod-note').style.display = '';
+      }
     } else {
       detected.textContent = 'Detected: ' + os + ' ' + arch;
       btn.style.display = 'none';
