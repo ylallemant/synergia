@@ -94,13 +94,19 @@ type BrandingConfig struct {
 // The manager uses this to determine which roles a worker can assume.
 type RoleModel struct {
 	gorm.Model
-	Role          string `gorm:"uniqueIndex;size:40"`       // e.g., "embedding", "inference", "ingestion"
-	LLMModel      string `gorm:"column:llm_model;size:128"` // e.g., "mistral-small-3.1-24b-instruct"
-	Quantisation  string `gorm:"size:20"`                   // e.g., "Q4_K_M"
-	ModelFilename string `gorm:"size:256"`                  // GGUF filename served by model store
-	ModelFileHash string `gorm:"size:64"`                   // SHA256 hex of the model file (central truth)
-	MinVRAMMB     int    `gorm:"column:min_vram_mb"`        // minimum VRAM in MB required to run this model
-	Description   string `gorm:"size:256"`                  // human-readable description shown in UI
+	Role          string `gorm:"uniqueIndex;size:40"        json:"role"`
+	LLMModel      string `gorm:"column:llm_model;size:128"  json:"llm_model"`
+	Quantisation  string `gorm:"size:20"                    json:"quantisation"`
+	ModelFilename string `gorm:"size:256"                   json:"model_filename"`
+	ModelFileHash string `gorm:"size:64"                    json:"model_file_hash"`
+	MinVRAMMB     int    `gorm:"column:min_vram_mb"         json:"min_vram_mb"`
+	Description   string `gorm:"size:256"                   json:"description"`
+	// llama-server operational parameters — sent to workers in model_update messages
+	ContextSize    int    `gorm:"default:4096"               json:"context_size"`
+	EndpointType   string `gorm:"size:20;default:chat"       json:"endpoint_type"`
+	ParallelSlots  int    `gorm:"default:1"                  json:"parallel_slots"`
+	GPULayers      int    `gorm:"default:-1"                 json:"gpu_layers"`
+	FlashAttention bool   `gorm:"default:false"              json:"flash_attention"`
 }
 
 // ClientError stores errors reported by workers.

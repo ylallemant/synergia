@@ -13,7 +13,7 @@ import (
 
 // ModelUpdatePusher is the interface for pushing model updates to connected workers.
 type ModelUpdatePusher interface {
-	PushModelUpdate(role, model, quantisation, filename, modelFileHash, llmHash string) error
+	PushModelUpdate(role, model, quantisation, filename, modelFileHash, llmHash string, contextSize, parallelSlots, gpuLayers int, endpointType string, flashAttention bool) error
 }
 
 // AdminRolesAPI manages role-model mappings.
@@ -51,6 +51,12 @@ func (r *AdminRolesAPI) AdminRolesHandler(w http.ResponseWriter, req *http.Reque
 			ModelFileHash string `json:"model_file_hash"`
 			MinVRAMMB     int    `json:"min_vram_mb"`
 			Description   string `json:"description"`
+			// llama-server operational parameters
+			ContextSize    int    `json:"context_size"`
+			EndpointType   string `json:"endpoint_type"`
+			ParallelSlots  int    `json:"parallel_slots"`
+			GPULayers      int    `json:"gpu_layers"`
+			FlashAttention bool   `json:"flash_attention"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&req2); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -60,11 +66,26 @@ func (r *AdminRolesAPI) AdminRolesHandler(w http.ResponseWriter, req *http.Reque
 			writeError(w, http.StatusBadRequest, "role, model, and min_vram_mb (>0) are required")
 			return
 		}
+		// Apply defaults for llama params when not explicitly set
+		if req2.ContextSize == 0 {
+			req2.ContextSize = 4096
+		}
+		if req2.EndpointType == "" {
+			req2.EndpointType = "chat"
+		}
+		if req2.ParallelSlots == 0 {
+			req2.ParallelSlots = 1
+		}
+		if req2.GPULayers == 0 {
+			req2.GPULayers = -1
+		}
+
 		if err := r.store.UpsertRoleModel(req2.Role, req2.Model, req2.Quantisation, req2.Filename, req2.ModelFileHash, req2.MinVRAMMB, req2.Description); err != nil {
 			writeError(w, http.StatusInternalServerError, "database error")
 			return
 		}
-		log.Info().Str("role", req2.Role).Str("model", req2.Model).Str("filename", req2.Filename).Int("min_vram_mb", req2.MinVRAMMB).Msg("role-model mapping updated")
+		_ = r.store.SetRoleLlamaConfig(req2.Role, req2.ContextSize, req2.ParallelSlots, req2.GPULayers, req2.EndpointType, req2.FlashAttention)
+		log.Info().Str("role", req2.Role).Str("model", req2.Model).Str("endpoint", req2.EndpointType).Int("ctx", req2.ContextSize).Msg("role-model mapping updated")
 
 		if req2.ModelFileHash == "" && req2.Filename != "" && r.modelStore != nil {
 			if hash, hashErr := r.modelStore.FileHash(context.Background(), req2.Filename); hashErr == nil {
@@ -78,7 +99,7 @@ func (r *AdminRolesAPI) AdminRolesHandler(w http.ResponseWriter, req *http.Reque
 
 		if r.gateway != nil && req2.ModelFileHash != "" {
 			llmHash := protocol.ComputeLLMHash(req2.Role, req2.ModelFileHash)
-			if err := r.gateway.PushModelUpdate(req2.Role, req2.Model, req2.Quantisation, req2.Filename, req2.ModelFileHash, llmHash); err != nil {
+			if err := r.gateway.PushModelUpdate(req2.Role, req2.Model, req2.Quantisation, req2.Filename, req2.ModelFileHash, llmHash, req2.ContextSize, req2.ParallelSlots, req2.GPULayers, req2.EndpointType, req2.FlashAttention); err != nil {
 				log.Warn().Err(err).Msg("failed to push model update to worker (may not be connected)")
 			}
 		}

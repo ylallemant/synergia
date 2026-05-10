@@ -434,7 +434,7 @@ func (g *Gateway) verifyOrRegisterKey(fingerprint string, pubKey ed25519.PublicK
 
 // PushModelUpdate sends a model_update message to the connected worker,
 // instructing it to switch to the new model configuration.
-func (g *Gateway) PushModelUpdate(role, model, quantisation, filename, modelFileHash, llmHash string) error {
+func (g *Gateway) PushModelUpdate(role, model, quantisation, filename, modelFileHash, llmHash string, contextSize, parallelSlots, gpuLayers int, endpointType string, flashAttention bool) error {
 	g.mu.RLock()
 	wc := g.worker
 	g.mu.RUnlock()
@@ -444,13 +444,18 @@ func (g *Gateway) PushModelUpdate(role, model, quantisation, filename, modelFile
 	}
 
 	update := &protocol.ModelUpdate{
-		Type:          protocol.TypeModelUpdate,
-		Role:          role,
-		Model:         model,
-		Quantisation:  quantisation,
-		Filename:      filename,
-		ModelFileHash: modelFileHash,
-		LLMHash:       llmHash,
+		Type:           protocol.TypeModelUpdate,
+		Role:           role,
+		Model:          model,
+		Quantisation:   quantisation,
+		Filename:       filename,
+		ModelFileHash:  modelFileHash,
+		LLMHash:        llmHash,
+		ContextSize:    contextSize,
+		EndpointType:   endpointType,
+		ParallelSlots:  parallelSlots,
+		GPULayers:      gpuLayers,
+		FlashAttention: flashAttention,
 	}
 
 	log.Info().

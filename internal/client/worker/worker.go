@@ -318,6 +318,11 @@ func (w *Worker) handleModelUpdate(mu *protocol.ModelUpdate) {
 		Str("quantisation", mu.Quantisation).
 		Str("filename", mu.Filename).
 		Str("expected_hash", mu.LLMHash).
+		Str("endpoint_type", mu.EndpointType).
+		Int("context_size", mu.ContextSize).
+		Int("parallel_slots", mu.ParallelSlots).
+		Int("gpu_layers", mu.GPULayers).
+		Bool("flash_attention", mu.FlashAttention).
 		Msg("received model update — downloading and hashing model file")
 
 	// Signal that the worker is updating (unavailable for work dispatch)

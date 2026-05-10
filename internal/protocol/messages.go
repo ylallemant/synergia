@@ -78,6 +78,12 @@ type ModelUpdate struct {
 	Filename      string `json:"filename"`        // model filename in the model store
 	ModelFileHash string `json:"model_file_hash"` // expected SHA256 of the model file
 	LLMHash       string `json:"llm_hash"`        // expected llmHash after update
+	// llama-server operational parameters — apply when (re)starting llama-server
+	ContextSize    int    `json:"context_size,omitempty"`
+	EndpointType   string `json:"endpoint_type,omitempty"`
+	ParallelSlots  int    `json:"parallel_slots,omitempty"`
+	GPULayers      int    `json:"gpu_layers,omitempty"`
+	FlashAttention bool   `json:"flash_attention,omitempty"`
 }
 
 // LLMHashReport is sent from worker to manager to confirm the current LLM hash.

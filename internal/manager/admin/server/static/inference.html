@@ -79,12 +79,35 @@
     <summary>Add / Update Role</summary>
     <form id="roleForm" class="admin-form">
       <div class="form-grid-2col">
-        <div class="form-row"><label for="role_name">Role</label><input type="text" id="role_name" name="role" placeholder="e.g. inference" required></div>
-        <div class="form-row"><label for="role_model">Model</label><input type="text" id="role_model" name="model" placeholder="e.g. mistral-small-3.1" required></div>
-        <div class="form-row"><label for="role_quant">Quantisation</label><input type="text" id="role_quant" name="quantisation" placeholder="e.g. Q4_K_M"></div>
-        <div class="form-row"><label for="role_file">Filename</label><input type="text" id="role_file" name="filename" placeholder="model.gguf"></div>
-        <div class="form-row"><label for="role_vram">Min VRAM (MB)</label><input type="number" id="role_vram" name="min_vram_mb" min="1" required></div>
-        <div class="form-row"><label for="role_desc">Description</label><input type="text" id="role_desc" name="description" placeholder="optional"></div>
+        <div class="form-row"><label for="role_name">Role</label><input type="text" id="role_name" placeholder="e.g. inference" required></div>
+        <div class="form-row"><label for="role_model">Model</label><input type="text" id="role_model" placeholder="e.g. mistral-small-3.1" required></div>
+        <div class="form-row"><label for="role_quant">Quantisation</label><input type="text" id="role_quant" placeholder="e.g. Q4_K_M"></div>
+        <div class="form-row"><label for="role_file">Filename</label><input type="text" id="role_file" placeholder="model.gguf"></div>
+        <div class="form-row"><label for="role_vram">Min VRAM (MB)</label><input type="number" id="role_vram" min="1" required></div>
+        <div class="form-row"><label for="role_desc">Description</label><input type="text" id="role_desc" placeholder="optional"></div>
+        <div class="form-row">
+          <label for="role_endpoint">Endpoint <span class="info-icon" data-tip="Which llama-server API path to call. 'chat' uses /v1/chat/completions, 'embedding' uses /v1/embeddings. Match this to the model type.">i</span></label>
+          <select id="role_endpoint">
+            <option value="chat">chat</option>
+            <option value="embedding">embedding</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label for="role_ctx">Context Size <span class="info-icon" data-tip="Token context window (--ctx-size). Directly affects VRAM. Embedding roles can use 512; reasoning/ingestion roles may need 8k–32k. Default: 4096.">i</span></label>
+          <input type="number" id="role_ctx" value="4096" placeholder="4096">
+        </div>
+        <div class="form-row">
+          <label for="role_parallel">Parallel Slots <span class="info-icon" data-tip="Concurrent inference requests per worker (--parallel). Higher values increase throughput but multiply VRAM usage per slot. Default: 1.">i</span></label>
+          <input type="number" id="role_parallel" value="1" min="1">
+        </div>
+        <div class="form-row">
+          <label for="role_gpu">GPU Layers <span class="info-icon" data-tip="Transformer layers offloaded to GPU (--n-gpu-layers). -1 = all layers (full GPU), 0 = CPU only. Partial values trade VRAM for RAM. Default: -1.">i</span></label>
+          <input type="number" id="role_gpu" value="-1" placeholder="-1 = all">
+        </div>
+        <div class="form-row">
+          <label for="role_flash">Flash Attention <span class="info-icon" data-tip="Enable FlashAttention-2 (--flash-attn). Reduces VRAM and speeds up inference on long contexts. Not supported by all quantisations — test before enabling. Default: off.">i</span></label>
+          <label class="toggle"><input type="checkbox" id="role_flash"><span class="toggle-track"></span></label>
+        </div>
       </div>
       <div class="form-actions">
         <button type="submit">Save Role</button>
@@ -204,6 +227,9 @@ document.getElementById("backendForm").addEventListener("submit", async (e) => {
 });
 
 // ── Roles ──────────────────────────────────────────────────────────────────
+const rolesMap = {};
+let openEditRole = null;
+
 async function loadRoles() {
   try {
     const resp = await fetch("/v1/admin/roles", {headers});
@@ -211,29 +237,132 @@ async function loadRoles() {
     const roles = await resp.json();
     const tbody = document.getElementById("rolesBody");
     if (!roles || roles.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">No role mappings configured.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">No role mappings configured.</td></tr>';
+      Object.keys(rolesMap).forEach(k => delete rolesMap[k]);
       return;
     }
-    tbody.innerHTML = roles.map(r => `<tr>
-      <td>${r.Role}</td><td>${r.LLMModel || ""}</td><td>${r.Quantisation || ""}</td>
-      <td class="mono">${r.ModelFilename || ""}</td><td>${r.MinVRAMMB}</td>
-      <td>${r.Description || ""}</td>
-      <td><button class="btn-small btn-delete" onclick="deleteRole('${r.Role}')">&#x2715;</button></td>
+    roles.forEach(r => rolesMap[r.role] = r);
+    tbody.innerHTML = roles.map(r => `<tr id="role-row-${r.role}">
+      <td>${r.role}</td><td>${r.llm_model || ""}</td><td>${r.quantisation || ""}</td>
+      <td class="mono">${r.model_filename || ""}</td><td>${r.min_vram_mb}</td>
+      <td>${r.description || ""}</td>
+      <td style="white-space:nowrap">
+        <button class="btn-small" onclick="editRole('${r.role}')" title="Edit">&#x270E;</button>
+        <button class="btn-small btn-delete" onclick="deleteRole('${r.role}')" title="Delete">&#x2715;</button>
+      </td>
     </tr>`).join("");
   } catch(e) { console.error("Failed to load roles:", e); }
+}
+
+function editRole(role) {
+  // Toggle: close if already open for this role
+  if (openEditRole === role) { closeEditRole(role); return; }
+  // Close any other open edit panel
+  if (openEditRole) closeEditRole(openEditRole);
+  openEditRole = role;
+
+  const r = rolesMap[role] || {};
+  const ctx         = r.context_size    ?? 4096;
+  const endpoint    = r.endpoint_type   || "chat";
+  const parallel    = r.parallel_slots  ?? 1;
+  const gpuLayers   = r.gpu_layers      ?? -1;
+  const flash       = r.flash_attention ?? false;
+
+  const editRow = document.createElement("tr");
+  editRow.id = "edit-row-" + role;
+  editRow.innerHTML = `
+    <td colspan="8" style="padding:0">
+      <div class="role-edit-panel">
+        <div class="form-grid-2col" style="padding:1rem 1rem 0.5rem">
+          <div class="form-row"><label>Model</label><input id="er_model" value="${r.llm_model || ""}"></div>
+          <div class="form-row"><label>Quantisation</label><input id="er_quant" value="${r.quantisation || ""}"></div>
+          <div class="form-row"><label>Filename</label><input id="er_file" value="${r.model_filename || ""}"></div>
+          <div class="form-row"><label>Min VRAM (MB)</label><input type="number" id="er_vram" value="${r.min_vram_mb || 0}" min="1"></div>
+          <div class="form-row"><label>Description</label><input id="er_desc" value="${r.description || ""}"></div>
+          <div class="form-row">
+            <label>Endpoint <span class="info-icon" data-tip="'chat' → /v1/chat/completions, 'embedding' → /v1/embeddings. Match to the model type.">i</span></label>
+            <select id="er_endpoint">
+              <option value="chat"      ${endpoint === "chat"      ? "selected" : ""}>chat</option>
+              <option value="embedding" ${endpoint === "embedding" ? "selected" : ""}>embedding</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>Context Size <span class="info-icon" data-tip="Token context window (--ctx-size). Affects VRAM. Embeddings: 512; reasoning: 8k+. Default: 4096.">i</span></label>
+            <input type="number" id="er_ctx" value="${ctx}" placeholder="4096">
+          </div>
+          <div class="form-row">
+            <label>Parallel Slots <span class="info-icon" data-tip="Concurrent inference requests (--parallel). Each slot multiplies VRAM usage. Default: 1.">i</span></label>
+            <input type="number" id="er_parallel" value="${parallel}" placeholder="1" min="1">
+          </div>
+          <div class="form-row">
+            <label>GPU Layers <span class="info-icon" data-tip="Layers offloaded to GPU (--n-gpu-layers). -1 = all (full GPU), 0 = CPU only. Default: -1.">i</span></label>
+            <input type="number" id="er_gpu" value="${gpuLayers}" placeholder="-1 = all">
+          </div>
+          <div class="form-row">
+            <label>Flash Attention <span class="info-icon" data-tip="FlashAttention-2 (--flash-attn). Saves VRAM on long contexts. Not supported by all quants — test first.">i</span></label>
+            <label class="toggle"><input type="checkbox" id="er_flash" ${flash ? "checked" : ""}><span class="toggle-track"></span></label>
+          </div>
+        </div>
+        <div class="form-actions" style="padding:0 1rem 1rem">
+          <button onclick="saveEditRole('${role}')">Save &amp; Push</button>
+          <button class="btn-small" onclick="closeEditRole('${role}')">Cancel</button>
+          <span class="status-msg" id="er_status"></span>
+        </div>
+      </div>
+    </td>`;
+
+  const targetRow = document.getElementById("role-row-" + role);
+  if (targetRow) targetRow.insertAdjacentElement("afterend", editRow);
+}
+
+function closeEditRole(role) {
+  const row = document.getElementById("edit-row-" + role);
+  if (row) row.remove();
+  if (openEditRole === role) openEditRole = null;
+}
+
+async function saveEditRole(role) {
+  const status = document.getElementById("er_status");
+  const gpuVal = parseInt(document.getElementById("er_gpu").value);
+  const body = {
+    role:           role,
+    model:          document.getElementById("er_model").value.trim(),
+    quantisation:   document.getElementById("er_quant").value.trim(),
+    filename:       document.getElementById("er_file").value.trim(),
+    min_vram_mb:    parseInt(document.getElementById("er_vram").value) || 0,
+    description:    document.getElementById("er_desc").value.trim(),
+    endpoint_type:  document.getElementById("er_endpoint").value,
+    context_size:   parseInt(document.getElementById("er_ctx").value)      || 4096,
+    parallel_slots: parseInt(document.getElementById("er_parallel").value) || 1,
+    gpu_layers:     isNaN(gpuVal) ? -1 : gpuVal,
+    flash_attention: document.getElementById("er_flash").checked,
+  };
+  try {
+    const resp = await fetch("/v1/admin/roles", {method: "PUT", headers, body: JSON.stringify(body)});
+    if (resp.ok) {
+      showStatus(status, "Saved ✓", true);
+      setTimeout(() => { closeEditRole(role); loadRoles(); }, 700);
+    } else { showStatus(status, "Error " + resp.status + ": " + await resp.text(), false); }
+  } catch(err) { showStatus(status, "Network error: " + err.message, false); }
 }
 loadRoles();
 
 document.getElementById("roleForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const status = document.getElementById("roleStatus");
+  const gpuVal = parseInt(document.getElementById("role_gpu").value);
   const body = {
-    role: document.getElementById("role_name").value,
-    model: document.getElementById("role_model").value,
-    quantisation: document.getElementById("role_quant").value,
-    filename: document.getElementById("role_file").value,
-    min_vram_mb: parseInt(document.getElementById("role_vram").value) || 0,
-    description: document.getElementById("role_desc").value
+    role:           document.getElementById("role_name").value.trim(),
+    model:          document.getElementById("role_model").value.trim(),
+    quantisation:   document.getElementById("role_quant").value.trim(),
+    filename:       document.getElementById("role_file").value.trim(),
+    min_vram_mb:    parseInt(document.getElementById("role_vram").value) || 0,
+    description:    document.getElementById("role_desc").value.trim(),
+    endpoint_type:  document.getElementById("role_endpoint").value,
+    context_size:   parseInt(document.getElementById("role_ctx").value)      || 4096,
+    parallel_slots: parseInt(document.getElementById("role_parallel").value) || 1,
+    gpu_layers:     isNaN(gpuVal) ? -1 : gpuVal,
+    flash_attention: document.getElementById("role_flash").checked,
   };
   try {
     const resp = await fetch("/v1/admin/roles", {method: "POST", headers, body: JSON.stringify(body)});

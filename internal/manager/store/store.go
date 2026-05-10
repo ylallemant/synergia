@@ -336,6 +336,18 @@ func (s *Store) UpsertRoleModel(role, model, quantisation, modelFilename, modelF
 	}).Error
 }
 
+// SetRoleLlamaConfig updates the llama-server operational parameters for an existing role.
+// Called separately from UpsertRoleModel so seed callers are unaffected.
+func (s *Store) SetRoleLlamaConfig(role string, contextSize, parallelSlots, gpuLayers int, endpointType string, flashAttention bool) error {
+	return s.DB.Model(&RoleModel{}).Where("role = ?", role).Updates(map[string]any{
+		"context_size":    contextSize,
+		"parallel_slots":  parallelSlots,
+		"gpu_layers":      gpuLayers,
+		"endpoint_type":   endpointType,
+		"flash_attention": flashAttention,
+	}).Error
+}
+
 // DeleteRoleModel removes a role-model mapping by role name.
 func (s *Store) DeleteRoleModel(role string) error {
 	return s.DB.Where("role = ?", role).Delete(&RoleModel{}).Error
