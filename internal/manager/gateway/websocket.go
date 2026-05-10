@@ -63,14 +63,26 @@ func New(workerKey string, q *queue.Queue, s *store.Store) *Gateway {
 	}
 }
 
+// SetWorkerKey updates the worker authentication mode at runtime.
+// An empty key enables TOFU mode; a non-empty key enables key-auth mode.
+// Safe to call while the gateway is serving connections.
+func (g *Gateway) SetWorkerKey(key string) {
+	g.mu.Lock()
+	g.workerKey = key
+	g.mu.Unlock()
+}
+
 // ServeHTTP handles the WebSocket upgrade for /ws/worker.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Auth mode:
 	//   key-auth — workerKey configured: Bearer token must match before upgrade
 	//   TOFU     — workerKey empty: challenge-response after upgrade
 	authHeader := r.Header.Get("Authorization")
-	if g.workerKey != "" {
-		if authHeader != "Bearer "+g.workerKey {
+	g.mu.RLock()
+	workerKey := g.workerKey
+	g.mu.RUnlock()
+	if workerKey != "" {
+		if authHeader != "Bearer "+workerKey {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -125,7 +137,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if g.workerKey == "" {
+	if workerKey == "" {
 		// TOFU mode: challenge-response after upgrade
 		log.Debug().Str("fingerprint", fingerprint).Msg("handshake: TOFU mode — sending challenge")
 		if !doChallenge(conn, pubKey) {

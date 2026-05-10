@@ -121,6 +121,20 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to seed tester role")
 	}
 
+	// Worker auth mode: TOFU (Ed25519 challenge-response) is the default.
+	// The admin UI Workers page (stored in DB) is the authoritative config.
+	// CLUSTER_WORKER_KEY env var is deprecated and ignored; set key-auth via
+	// Admin → Workers if needed for legacy deployments.
+	if os.Getenv("CLUSTER_WORKER_KEY") != "" {
+		log.Warn().Msg("CLUSTER_WORKER_KEY env var is deprecated and ignored — configure worker auth via Admin → Workers")
+	}
+	cfg.WorkerKey = "" // TOFU unless DB explicitly says key-auth
+	if wac, err := db.GetWorkerAuthConfig(); err == nil && wac != nil {
+		if !wac.TOFUEnabled && wac.WorkerKey != "" {
+			cfg.WorkerKey = wac.WorkerKey
+		}
+	}
+
 	q := queue.New()
 	gw := gateway.New(cfg.WorkerKey, q, db)
 	completions := api.NewCompletionsHandler(cfg.APIKey, gw, q, db, cfg.Timeout)
@@ -266,15 +280,6 @@ func main() {
 
 	// Administration server (separate port)
 
-	// Worker auth config stored via admin UI overrides env vars at startup
-	if wac, err := db.GetWorkerAuthConfig(); err == nil && wac != nil {
-		if wac.TOFUEnabled {
-			cfg.WorkerKey = ""
-		} else if wac.WorkerKey != "" {
-			cfg.WorkerKey = wac.WorkerKey
-		}
-	}
-
 	// OIDC config stored via admin UI overrides env vars at startup
 	if oidcDB, err := db.GetOIDCConfig(); err == nil && oidcDB != nil {
 		cfg.OIDCEnabled = oidcDB.Enabled
@@ -318,7 +323,7 @@ func main() {
 	adminServer.HandleFuncAdmin("/v1/admin/branding/css", adminBrandingAPI.AdminUpdateHandler)
 	adminOIDCAPI := adminapi.NewAdminOIDCAPI(db)
 	adminServer.HandleFuncAdmin("/v1/admin/oidc", adminOIDCAPI.ConfigHandler)
-	adminWorkersAPI := adminapi.NewAdminWorkersAPI(db)
+	adminWorkersAPI := adminapi.NewAdminWorkersAPI(db, gw)
 	adminServer.HandleFuncAdmin("/v1/admin/workers", adminWorkersAPI.ConfigHandler)
 	adminStatsAPI := adminapi.NewAdminStatsAPI(adminCache)
 	adminServer.HandleFuncAdmin("/v1/admin/stats", adminStatsAPI.StatsHandler)

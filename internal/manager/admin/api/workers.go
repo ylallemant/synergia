@@ -11,13 +11,20 @@ import (
 
 const workerKeyMask = "••••••••"
 
-// AdminWorkersAPI manages worker authentication configuration.
-type AdminWorkersAPI struct {
-	store *store.Store
+// WorkerKeyUpdater lets the admin API push auth-mode changes to the live gateway
+// without requiring a manager restart.
+type WorkerKeyUpdater interface {
+	SetWorkerKey(key string)
 }
 
-func NewAdminWorkersAPI(s *store.Store) *AdminWorkersAPI {
-	return &AdminWorkersAPI{store: s}
+// AdminWorkersAPI manages worker authentication configuration.
+type AdminWorkersAPI struct {
+	store   *store.Store
+	gateway WorkerKeyUpdater
+}
+
+func NewAdminWorkersAPI(s *store.Store, gw WorkerKeyUpdater) *AdminWorkersAPI {
+	return &AdminWorkersAPI{store: s, gateway: gw}
 }
 
 type workerAuthPayload struct {
@@ -84,11 +91,15 @@ func (a *AdminWorkersAPI) setConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mode := "key-auth"
+	// Apply to the live gateway immediately — no restart required.
 	if payload.TOFUEnabled {
-		mode = "TOFU"
+		a.gateway.SetWorkerKey("")
+		log.Info().Msg("worker auth config updated — TOFU mode active")
+	} else {
+		a.gateway.SetWorkerKey(key)
+		log.Info().Msg("worker auth config updated — key-auth mode active")
 	}
-	log.Info().Str("mode", mode).Msg("worker auth config updated — restart required to apply")
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
