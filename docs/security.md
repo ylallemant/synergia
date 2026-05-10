@@ -226,6 +226,83 @@ curl -sk -b admin-cookie.txt \
 
 ---
 
+---
+
+## Architecture: Split-Image Deployment
+
+### Concept
+
+The current manager is a single binary that handles everything: worker WebSocket connections, the public completions API, binary distribution, the admin UI, and all DB/filesystem writes. Splitting the public-facing surface into dedicated **proxy images** that sit in front of a non-exposed manager reduces attack surface and enables independent hardening.
+
+```
+Internet
+  │
+  ├─► [worker-proxy pods]  (:7500/ws/worker, :7500/v1/*)   ← exposed, hardened
+  │         │ HTTP/WS forward (internal network only)
+  └─► [api-proxy pods]     (:7500/v1/chat/completions, …)  ← exposed, hardened
+              │
+        [manager pod]  (admin :7501, DB, FS, cache)         ← never exposed
+```
+
+The proxies hold no state and need no filesystem writes, which lets them run on a far more restrictive image:
+
+| Property | Proxy image | Manager image |
+|---|---|---|
+| Base image | `gcr.io/distroless/static` or `scratch` | Alpine (current) |
+| Filesystem | read-only | writable (SQLite, model cache) |
+| Shell | none | `/bin/sh` (busybox) |
+| Seccomp | strict allow-list | default |
+| Capabilities | none | none |
+| SUID binaries | none | none |
+| Network exposure | yes (LoadBalancer) | ClusterIP only |
+
+In a Kubernetes deployment, enabling the proxy tier is optional — controlled by a Helm values flag. Without it, the manager service is exposed directly as today.
+
+### Security benefit
+
+If a vulnerability in WebSocket frame parsing or the completions endpoint is exploited, the attacker lands in a distroless container with a read-only filesystem, no shell, and no network path to the internet. Lateral movement to the manager requires pivoting through the internal network with no tooling available. The manager — which holds the DB, the admin session secrets, and the model cache — never faces the internet.
+
+### Scalability benefit
+
+The API proxy tier (completions, batch) is stateless HTTP and scales horizontally with no special coordination. For WebSocket connections, each worker proxy pod maintains its own set of live connections; sticky sessions (client/worker pinned to one pod by the load balancer) allow horizontal scale-out without changing the gateway protocol. A message bus (Redis pub/sub, NATS) between proxy pods and the manager would remove the sticky-session requirement and support millions of concurrent WebSocket connections, but that is a significant protocol refactor.
+
+### Implementation challenges
+
+1. **WebSocket state is in-process** — `gateway.PushModelUpdate` iterates over live connections held in the manager's memory. A proxy that only forwards frames cannot receive push messages on behalf of the manager. This is resolved without a message bus: each proxy pod exposes a lightweight internal endpoint that the manager calls when it needs to push an update:
+
+   ```
+   POST /internal/push/model-update   (body: ModelUpdate JSON)
+   ```
+
+   The manager calls this endpoint on every known proxy pod; each pod fans out the message to its locally-connected workers. The manager discovers live proxy pods via a k8s headless service (all pod IPs via DNS) or by having proxy pods register themselves on startup. Workers that miss a push (e.g., mid-reconnect) receive the current model config on their next successful handshake, which is the same behaviour as today. No external broker required.
+
+2. **TOFU challenge-response** — the manager generates a nonce and must verify the signed response from the same worker. Rather than replicating nonce state across proxy pods, the manager can own the full handshake via two lightweight internal endpoints:
+
+   ```
+   POST /internal/challenge/issue?fingerprint=<fp>
+       → manager generates nonce, stores {fingerprint → nonce + expiry} in-memory (TTL ~30 s), returns {nonce}
+
+   POST /internal/challenge/verify
+       body: {fingerprint, nonce, signature, pubkey}
+       → manager looks up stored nonce, verifies Ed25519 signature, returns {ok: true/false}
+   ```
+
+   The proxy calls `issue` when the WebSocket upgrades, forwards the `Challenge` message to the worker, receives the `SignedResponse`, then calls `verify` before allowing the connection. All cryptographic logic stays in the manager; the proxy is stateless with respect to authentication. This works with or without sticky sessions and requires no external broker.
+
+3. **Binary patching endpoint** (`/download/*`) — currently served by the manager since it reads from the local cache directory. The proxy tier could serve pre-patched binaries from an object store (S3, GCS) instead, removing this dependency on the manager's filesystem.
+
+4. **Admin UI** (`localhost:7501`) — already separated on a different port and never intended to be exposed. No change needed.
+
+### Phased roadmap
+
+| Phase | Scope | Code changes |
+|---|---|---|
+| **1 — Security isolation** | Single proxy pod per role (worker-proxy, api-proxy); sticky sessions; ClusterIP manager | Thin reverse-proxy binary (or nginx/Envoy config); Helm chart toggle; no gateway changes |
+| **2 — Horizontal scale** | Multi-pod worker proxy; manager fans out pushes via internal proxy endpoints; manager-owned challenge endpoints | Proxy internal API (`/internal/push/*`, `/internal/challenge/*`); manager pod-discovery (headless service or self-registration); client reconnect handling |
+| **3 — Binary distribution** | Pre-patch binaries uploaded to object store at release time; proxy serves directly | CI step to patch + upload; manager download handler becomes optional |
+
+---
+
 ## Relationship to Security TODOs
 
 The items in this file complement the implementation-level TODOs documented in:
