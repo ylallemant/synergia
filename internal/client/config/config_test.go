@@ -1,7 +1,6 @@
 package config
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -10,22 +9,22 @@ func TestDefaultManagerURLSentinel(t *testing.T) {
 	if sentinel != "$$SYNERGIA_MANAGER_URL$$" {
 		t.Fatalf("expected sentinel %q, got %q", "$$SYNERGIA_MANAGER_URL$$", sentinel)
 	}
-
 	if len(DefaultManagerURL) != defaultManagerURLSentinelSize {
-		t.Fatalf("expected default URL length %d, got %d", defaultManagerURLSentinelSize, len(DefaultManagerURL))
-	}
-	if strings.TrimRight(DefaultManagerURL, "\x00") != sentinel {
-		t.Fatalf("expected trimmed default URL to equal sentinel, got %q", strings.TrimRight(DefaultManagerURL, "\x00"))
+		t.Fatalf("expected slot size %d, got %d", defaultManagerURLSentinelSize, len(DefaultManagerURL))
 	}
 }
 
 func TestResolveManagerURLWithUnpatchedDefault(t *testing.T) {
 	orig := DefaultManagerURL
-	DefaultManagerURL = "$$SYNERGIA_MANAGER_URL$$" + strings.Repeat("\x00", defaultManagerURLSentinelSize-defaultManagerURLSentinelLen)
 	defer func() { DefaultManagerURL = orig }()
 
+	// Unpatched state: first 24 bytes are the sentinel, rest are zeros.
+	DefaultManagerURL = [256]byte{
+		'$', '$', 'S', 'Y', 'N', 'E', 'R', 'G', 'I', 'A',
+		'_', 'M', 'A', 'N', 'A', 'G', 'E', 'R', '_', 'U', 'R', 'L', '$', '$',
+	}
 	if got := resolveManagerURL(); got != "" {
-		t.Fatalf("expected empty resolved URL for unpatched default, got %q", got)
+		t.Fatalf("expected empty URL for unpatched sentinel, got %q", got)
 	}
 }
 
@@ -33,10 +32,13 @@ func TestResolveManagerURLWithPatchedValue(t *testing.T) {
 	orig := DefaultManagerURL
 	defer func() { DefaultManagerURL = orig }()
 
+	// Patched state: URL written at the start, rest null-padded.
 	patched := "wss://example.com/ws/worker"
-	DefaultManagerURL = patched + strings.Repeat("\x00", defaultManagerURLSentinelSize-len(patched))
+	var arr [256]byte
+	copy(arr[:], patched)
+	DefaultManagerURL = arr
 
 	if got := resolveManagerURL(); got != patched {
-		t.Fatalf("expected resolved URL %q, got %q", patched, got)
+		t.Fatalf("expected %q, got %q", patched, got)
 	}
 }

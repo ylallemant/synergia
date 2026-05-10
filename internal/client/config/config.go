@@ -9,73 +9,61 @@ import (
 	"time"
 )
 
-// DefaultManagerURL is a fixed 256-byte slot in the binary's read-only data.
-// The manager's download endpoint patches this slot at distribution time with
-// the real WSS URL, null-padded to fill all 256 bytes.
+// DefaultManagerURL is a 256-byte sentinel in the binary's __DATA segment.
+// The manager's download endpoint patches these bytes at distribution time
+// with the real WSS URL (null-padded to fill all 256 bytes).
 //
-// IMPORTANT: the sentinel text must appear exactly once in this binary.
-// Do NOT compare against it using a string literal elsewhere — use
-// defaultManagerURLSentinel() which returns a substring of DefaultManagerURL
-// (a slice header, not a new copy in rodata).
-var DefaultManagerURL = "$$SYNERGIA_MANAGER_URL$$" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00"
+// Using a [256]byte var (not a string literal) is intentional: string literals
+// are placed in __TEXT,__rodata which is covered by the ad-hoc code signature
+// that Go embeds in every darwin/arm64 binary. Patching __TEXT bytes invalidates
+// the signature and macOS SIGKILL-s the binary before it can run. __DATA pages
+// are writable and are NOT covered by the signature, so patching is safe.
+var DefaultManagerURL = [256]byte{
+	'$', '$', 'S', 'Y', 'N', 'E', 'R', 'G', 'I', 'A',
+	'_', 'M', 'A', 'N', 'A', 'G', 'E', 'R', '_', 'U', 'R', 'L', '$', '$',
+	// remaining 232 bytes are zero — the "unpatched" sentinel state
+}
 
 const defaultManagerURLSentinelSize = 256
 const defaultManagerURLSentinelLen  = 24 // len("$$SYNERGIA_MANAGER_URL$$")
 
-// defaultManagerURLSentinel returns the sentinel text as a substring of
-// DefaultManagerURL — no second copy of the bytes in rodata.
-func defaultManagerURLSentinel() string { return DefaultManagerURL[:defaultManagerURLSentinelLen] }
+func defaultManagerURLSentinel() string {
+	return string(DefaultManagerURL[:defaultManagerURLSentinelLen])
+}
 
 func resolveManagerURL() string {
-	url := strings.TrimRight(DefaultManagerURL, "\x00")
+	url := strings.TrimRight(string(DefaultManagerURL[:]), "\x00")
 	if url == defaultManagerURLSentinel() || url == "" {
 		return ""
 	}
 	return url
 }
 
-// DefaultWorkerKey is a fixed 96-byte slot in the binary's read-only data.
-// The manager's download endpoint can patch this slot at distribution time
-// with a Base64-encoded worker key, null-padded to 96 bytes, for key-auth
-// deployments. If unpatched (still the placeholder), the client uses TOFU mode.
-//
-// Same sentinel-uniqueness rule as DefaultManagerURL — use defaultWorkerKeySentinel().
-var DefaultWorkerKey = "$$SYNERGIA_WORKER_KEY$$" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" +
-	"\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+// DefaultWorkerKey is a 96-byte sentinel in __DATA, patched at distribution
+// time with a Base64-encoded worker key for key-auth deployments.
+// Same __DATA placement rationale as DefaultManagerURL above.
+var DefaultWorkerKey = [96]byte{
+	'$', '$', 'S', 'Y', 'N', 'E', 'R', 'G', 'I', 'A',
+	'_', 'W', 'O', 'R', 'K', 'E', 'R', '_', 'K', 'E', 'Y', '$', '$',
+	// remaining 73 bytes are zero
+}
 
 const defaultWorkerKeySentinelSize = 96
 const defaultWorkerKeySentinelLen  = 23 // len("$$SYNERGIA_WORKER_KEY$$")
 
-func defaultWorkerKeySentinel() string { return DefaultWorkerKey[:defaultWorkerKeySentinelLen] }
+func defaultWorkerKeySentinel() string {
+	return string(DefaultWorkerKey[:defaultWorkerKeySentinelLen])
+}
 
 // resolveWorkerKey returns the effective worker key in priority order:
 // 1. CLUSTER_WORKER_KEY env var (development / CI override)
-// 2. Base64-decoded binary sentinel (patched at distribution time by the manager)
+// 2. Base64-decoded binary sentinel (patched at distribution time)
 // 3. Empty string — TOFU mode, challenge-response auth is used instead
 func resolveWorkerKey() string {
 	if v := os.Getenv("CLUSTER_WORKER_KEY"); v != "" {
 		return v
 	}
-	raw := strings.TrimRight(DefaultWorkerKey, "\x00")
+	raw := strings.TrimRight(string(DefaultWorkerKey[:]), "\x00")
 	if raw == defaultWorkerKeySentinel() || raw == "" {
 		return ""
 	}
@@ -152,7 +140,6 @@ func Load() (*Config, error) {
 		return cfg, nil
 	}
 
-	// Worker key: sentinel → env var → empty (TOFU mode)
 	cfg.WorkerKey = resolveWorkerKey()
 
 	return cfg, nil
