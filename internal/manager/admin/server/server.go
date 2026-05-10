@@ -25,29 +25,31 @@ var inferenceTmpl = template.Must(template.ParseFS(staticFS, "static/inference.h
 
 // Server serves the admin dashboard and additional admin API routes.
 type Server struct {
-	addr        string
-	apiKey      string
-	store       *store.Store
-	cache       *cache.Cache
-	insecure    bool
-	tlsCertFile string
-	tlsKeyFile  string
-	auth        *auth.Auth
-	mux         *http.ServeMux
-	server      *http.Server
+	addr           string
+	apiKey         string
+	managerVersion string
+	store          *store.Store
+	cache          *cache.Cache
+	insecure       bool
+	tlsCertFile    string
+	tlsKeyFile     string
+	auth           *auth.Auth
+	mux            *http.ServeMux
+	server         *http.Server
 }
 
 // New creates a new admin dashboard server.
-func New(addr, apiKey string, s *store.Store, c *cache.Cache, insecure bool, tlsCertFile, tlsKeyFile string, a *auth.Auth) *Server {
+func New(addr, apiKey, managerVersion string, s *store.Store, c *cache.Cache, insecure bool, tlsCertFile, tlsKeyFile string, a *auth.Auth) *Server {
 	srv := &Server{
-		addr:        addr,
-		apiKey:      apiKey,
-		store:       s,
-		cache:       c,
-		insecure:    insecure,
-		tlsCertFile: tlsCertFile,
-		tlsKeyFile:  tlsKeyFile,
-		auth:        a,
+		addr:           addr,
+		apiKey:         apiKey,
+		managerVersion: managerVersion,
+		store:          s,
+		cache:          c,
+		insecure:       insecure,
+		tlsCertFile:    tlsCertFile,
+		tlsKeyFile:     tlsKeyFile,
+		auth:           a,
 		mux:         http.NewServeMux(),
 	}
 
@@ -121,7 +123,8 @@ func (s *Server) Run(ctx context.Context) {
 }
 
 type pageData struct {
-	APIKey string
+	APIKey         string
+	ManagerVersion string
 }
 
 // inferenceHandler serves GET /admin/inference — the inference settings page.
@@ -131,7 +134,7 @@ func (s *Server) inferenceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := inferenceTmpl.Execute(w, pageData{APIKey: s.apiKey}); err != nil {
+	if err := inferenceTmpl.Execute(w, pageData{APIKey: s.apiKey, ManagerVersion: s.managerVersion}); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }
@@ -143,7 +146,7 @@ func (s *Server) workersHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := workersTmpl.Execute(w, pageData{APIKey: s.apiKey}); err != nil {
+	if err := workersTmpl.Execute(w, pageData{APIKey: s.apiKey, ManagerVersion: s.managerVersion}); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }
@@ -157,7 +160,7 @@ func (s *Server) oidcHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := oidcTmpl.Execute(w, pageData{APIKey: s.apiKey}); err != nil {
+	if err := oidcTmpl.Execute(w, pageData{APIKey: s.apiKey, ManagerVersion: s.managerVersion}); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }
@@ -180,6 +183,7 @@ func (s *Server) dashboardHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) collectData() dashboardData {
 	var data dashboardData
 	data.APIKey = s.apiKey
+	data.ManagerVersion = s.managerVersion
 
 	stats := s.cache.GetStats()
 
@@ -250,6 +254,7 @@ func (s *Server) collectData() dashboardData {
 
 type dashboardData struct {
 	APIKey             string
+	ManagerVersion     string
 	TotalWorkers       int64
 	ReadyWorkers       int64
 	ProcessingWorkers  int64

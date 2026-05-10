@@ -9,7 +9,7 @@
 <body>
 
 <nav class="top-nav">
-  <a class="nav-brand" href="/">Synergia Admin</a>
+  <a class="nav-brand" href="/">Synergia Administration <span style="font-weight:400">v{{.ManagerVersion}}</span></a>
   <button class="nav-burger" id="navToggle" aria-label="Open menu">
     <span></span><span></span><span></span>
   </button>
@@ -208,7 +208,15 @@ async function loadSyncStats() {
       document.getElementById("verOutdated").textContent = s.workers_outdated;
     } else {
       document.getElementById("versionSyncGrid").style.display = "none";
-      document.getElementById("versionSyncNoTarget").style.display = "";
+      const notice = document.getElementById("versionSyncNoTarget");
+      notice.style.display = "";
+      // If a version is already selected in the dropdown, clarify that it has
+      // not been saved yet — the dropdown is pre-filled from GitHub tags but
+      // nothing is active until the admin presses Save & Push.
+      const selected = document.getElementById("ver_target").value;
+      notice.textContent = selected
+        ? `"${selected}" is selected but not yet saved — click Save & Push to set it as the target and start tracking client sync.`
+        : "No target version configured — set one above and push to start tracking client sync.";
     }
   } catch(e) { console.error("Failed to load sync stats:", e); }
 }

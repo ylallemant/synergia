@@ -57,8 +57,12 @@ func (d *DownloadAPI) DownloadPageHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	data := struct{ ClientVersion string }{
+		ClientVersion: d.cache.GetStats().VersionTarget,
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := downloadTmpl.Execute(w, nil); err != nil {
+	if err := downloadTmpl.Execute(w, data); err != nil {
 		log.Error().Err(err).Msg("failed to render download page")
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}

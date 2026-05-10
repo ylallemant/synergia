@@ -306,7 +306,7 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("auth initialization error")
 	}
-	adminServer := adminsrv.New(cfg.AdminAddr, cfg.APIKey, db, adminCache, cfg.Insecure, cfg.TLSCertFile, cfg.TLSKeyFile, authInstance)
+	adminServer := adminsrv.New(cfg.AdminAddr, cfg.APIKey, version, db, adminCache, cfg.Insecure, cfg.TLSCertFile, cfg.TLSKeyFile, authInstance)
 	adminServer.HandleFuncAdmin("/v1/latency", latencyAPI.LatencyHandler)
 	adminServer.HandleFuncAdmin("/v1/latency/config", latencyAPI.ConfigHandler)
 	adminServer.HandleFuncAdmin("/v1/admin/version", adminVersionAPI.AdminVersionHandler)
