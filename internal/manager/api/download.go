@@ -107,9 +107,12 @@ func (d *DownloadAPI) BinaryHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build the manager WSS URL from the request
+	// Build the manager WSS URL from the request.
+	// When the manager runs behind a TLS-terminating reverse proxy, r.TLS is
+	// nil even though the client is using HTTPS. Trust X-Forwarded-Proto when
+	// present; only fall back to ws:// if neither TLS nor the header is set.
 	scheme := "wss"
-	if r.TLS == nil {
+	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
 		scheme = "ws"
 	}
 	host := r.Host
