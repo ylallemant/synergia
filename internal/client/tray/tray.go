@@ -57,6 +57,12 @@ func (t *Tray) Run() {
 	systray.Run(t.onReady, t.onExit)
 }
 
+// Quit stops the system tray event loop, unblocking Run.
+// Called when the process receives SIGINT/SIGTERM so Ctrl-C exits cleanly.
+func (t *Tray) Quit() {
+	systray.Quit()
+}
+
 func (t *Tray) onReady() {
 	systray.SetTitle("DT")
 	systray.SetTooltip("DeepThink Worker")

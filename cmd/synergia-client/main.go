@@ -251,12 +251,16 @@ func main() {
 		}
 	}()
 
-	// Handle tray quit signal
+	// Handle tray quit signal and SIGINT/SIGTERM → tray shutdown.
+	// systray.Run() owns the main goroutine on macOS; it only returns after
+	// systray.Quit() is called, so we must call t.Quit() on context
+	// cancellation (Ctrl-C / SIGTERM) to unblock Run() and exit cleanly.
 	go func() {
 		select {
 		case <-t.QuitCh():
 			stop()
 		case <-ctx.Done():
+			t.Quit()
 		}
 	}()
 
