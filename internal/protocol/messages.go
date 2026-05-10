@@ -2,7 +2,7 @@ package protocol
 
 import "encoding/json"
 
-// Message types exchanged over WebSocket.
+// Message types exchanged over WebSocket between manager and worker.
 const (
 	TypeWorkUnit      = "work_unit"
 	TypeResult        = "result"
@@ -15,7 +15,7 @@ const (
 	TypeBackendUpdate = "backend_update"  // manager → worker: new backend binary available
 )
 
-// Envelope is the top-level WebSocket message wrapper.
+// Envelope is the top-level WebSocket message wrapper for type routing.
 type Envelope struct {
 	Type string `json:"type"`
 }
@@ -40,7 +40,7 @@ type ChatMessage struct {
 	Content string `json:"content"`
 }
 
-// Result is sent from worker to manager.
+// Result is sent from worker to manager after processing.
 type Result struct {
 	Type             string          `json:"type"`
 	ID               string          `json:"id"`
@@ -62,46 +62,45 @@ type Heartbeat struct {
 	Type string `json:"type"`
 }
 
-// Status is sent from worker to manager to report state changes (available, idle, processing).
+// Status is sent from worker to manager to report state changes.
 type Status struct {
 	Type    string `json:"type"`
-	State   string `json:"state"`
-	LLMHash string `json:"llm_hash,omitempty"` // worker's current LLM hash (included on status updates)
+	State   string `json:"state"`              // "available", "processing", "idle", "updating", "paused", "withdrawn"
+	LLMHash string `json:"llm_hash,omitempty"` // worker's current LLM hash
 }
 
-// ModelUpdate is sent from manager to worker when the role's model configuration changes.
-// The worker must download/load the new model and report back with an LLMHashReport.
+// ModelUpdate is sent from manager to worker when a role-model mapping changes.
 type ModelUpdate struct {
 	Type          string `json:"type"`
 	Role          string `json:"role"`
 	Model         string `json:"model"`
 	Quantisation  string `json:"quantisation"`
 	Filename      string `json:"filename"`        // model filename in the model store
-	ModelFileHash string `json:"model_file_hash"` // SHA256 hex of the model file (expected)
+	ModelFileHash string `json:"model_file_hash"` // expected SHA256 of the model file
 	LLMHash       string `json:"llm_hash"`        // expected llmHash after update
 }
 
-// LLMHashReport is sent from worker to manager to confirm the worker's current LLM configuration hash.
+// LLMHashReport is sent from worker to manager to confirm the current LLM hash.
 type LLMHashReport struct {
 	Type    string `json:"type"`
 	LLMHash string `json:"llm_hash"`
 }
 
-// BinaryUpdate is sent from manager to worker when a new client version is available.
+// BinaryUpdate is sent from manager to worker when a new client binary is available.
 type BinaryUpdate struct {
 	Type        string `json:"type"`
 	Version     string `json:"version"`
-	DownloadURL string `json:"download_url"`
-	FallbackURL string `json:"fallback_url"` // manager proxy download endpoint
+	DownloadURL string `json:"download_url"` // primary: GitHub release URL
+	FallbackURL string `json:"fallback_url"` // fallback: manager proxy endpoint
 	SHA256      string `json:"sha256"`
 }
 
-// BackendUpdate is sent from manager to worker when a new backend version is available.
+// BackendUpdate is sent from manager to worker when a new backend binary is available.
 type BackendUpdate struct {
 	Type        string `json:"type"`
 	Version     string `json:"version"`
 	DownloadURL string `json:"download_url"`
-	FallbackURL string `json:"fallback_url"` // manager cached proxy endpoint
+	FallbackURL string `json:"fallback_url"` // fallback: manager cached proxy
 	SHA256      string `json:"sha256"`
 }
 

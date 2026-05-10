@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
-	"github.com/ylallemant/synergia/internal/client/protocol"
+	"github.com/ylallemant/synergia/internal/protocol"
 )
 
 // Client communicates with the local llama-server via OpenAI-compatible API.

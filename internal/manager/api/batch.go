@@ -12,7 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/ylallemant/synergia/internal/manager/gateway"
 	"github.com/ylallemant/synergia/internal/manager/latency"
-	"github.com/ylallemant/synergia/internal/manager/protocol"
+	"github.com/ylallemant/synergia/internal/protocol"
 	"github.com/ylallemant/synergia/internal/manager/queue"
 	"github.com/ylallemant/synergia/internal/manager/store"
 )

@@ -15,7 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 	"github.com/ylallemant/synergia/internal/client/identity"
-	"github.com/ylallemant/synergia/internal/client/protocol"
+	"github.com/ylallemant/synergia/internal/protocol"
 	"github.com/ylallemant/synergia/internal/client/version"
 )
 

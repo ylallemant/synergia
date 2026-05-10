@@ -8,6 +8,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/ylallemant/synergia/internal/manager/models"
 	"github.com/ylallemant/synergia/internal/manager/store"
+	"github.com/ylallemant/synergia/internal/protocol"
 )
 
 // ModelUpdatePusher is the interface for pushing model updates to connected workers.
@@ -76,7 +77,7 @@ func (r *AdminRolesAPI) AdminRolesHandler(w http.ResponseWriter, req *http.Reque
 		}
 
 		if r.gateway != nil && req2.ModelFileHash != "" {
-			llmHash := store.ComputeLLMHash(req2.Role, req2.ModelFileHash)
+			llmHash := protocol.ComputeLLMHash(req2.Role, req2.ModelFileHash)
 			if err := r.gateway.PushModelUpdate(req2.Role, req2.Model, req2.Quantisation, req2.Filename, req2.ModelFileHash, llmHash); err != nil {
 				log.Warn().Err(err).Msg("failed to push model update to worker (may not be connected)")
 			}

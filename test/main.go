@@ -337,7 +337,6 @@ func main() {
 	defer clientLogs.Close()
 	clientCmd := exec.Command("go", "run", "./cmd/synergia-client",
 		"--manager-url", "wss://"+managerAddr+"/ws/worker",
-		"--worker-key", workerKey,
 		"--llm-url", "http://127.0.0.1:"+llamaServerPort,
 		"--model", testModelName,
 		"--quantisation", testQuantisation,
@@ -348,7 +347,7 @@ func main() {
 		"--tls-ca-cert", caCertPath,
 	)
 	clientCmd.Dir = repoRoot
-	clientCmd.Env = append(os.Environ(), "LOG_LEVEL=debug")
+	clientCmd.Env = append(os.Environ(), "LOG_LEVEL=debug", "CLUSTER_WORKER_KEY="+workerKey)
 	clientCmd.Stdout = clientLogs
 	clientCmd.Stderr = clientLogs
 	if err := clientCmd.Start(); err != nil {
@@ -1805,7 +1804,6 @@ func runServices() {
 	defer clientLogs.Close()
 	clientCmd := exec.Command("go", "run", "./cmd/synergia-client",
 		"--manager-url", "wss://"+managerAddr+"/ws/worker",
-		"--worker-key", workerKey,
 		"--llm-url", "http://127.0.0.1:"+llamaServerPort,
 		"--model", testModelName,
 		"--quantisation", testQuantisation,
@@ -1816,7 +1814,7 @@ func runServices() {
 		"--tls-ca-cert", caCertPath,
 	)
 	clientCmd.Dir = repoRoot
-	clientCmd.Env = append(os.Environ(), "LOG_LEVEL=debug")
+	clientCmd.Env = append(os.Environ(), "LOG_LEVEL=debug", "CLUSTER_WORKER_KEY="+workerKey)
 	clientCmd.Stdout = clientLogs
 	clientCmd.Stderr = clientLogs
 	if err := clientCmd.Start(); err != nil {

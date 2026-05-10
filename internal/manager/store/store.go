@@ -6,6 +6,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/rs/zerolog/log"
+	"github.com/ylallemant/synergia/internal/protocol"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -684,7 +685,7 @@ func (s *Store) UpdateWorkerSyncStatus(fingerprint string) string {
 	// Try preferred role first
 	var rm RoleModel
 	if err := s.DB.Where("role = ?", role).First(&rm).Error; err == nil && rm.ModelFileHash != "" {
-		expectedHash := ComputeLLMHash(role, rm.ModelFileHash)
+		expectedHash := protocol.ComputeLLMHash(role, rm.ModelFileHash)
 		if worker.LLMHash == expectedHash {
 			s.DB.Model(&Worker{}).Where("fingerprint = ?", fingerprint).Update("sync_status", "synced")
 			return "synced"
@@ -699,7 +700,7 @@ func (s *Store) UpdateWorkerSyncStatus(fingerprint string) string {
 		if r.ModelFileHash == "" {
 			continue
 		}
-		expectedHash := ComputeLLMHash(r.Role, r.ModelFileHash)
+		expectedHash := protocol.ComputeLLMHash(r.Role, r.ModelFileHash)
 		if worker.LLMHash == expectedHash {
 			s.DB.Model(&Worker{}).Where("fingerprint = ?", fingerprint).Update("sync_status", "synced")
 			return "synced"

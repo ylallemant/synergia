@@ -1,20 +1,10 @@
 package store
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"time"
 
 	"gorm.io/gorm"
 )
-
-// ComputeLLMHash computes a deterministic hash from a role and the actual model file hash.
-// modelFileHash must be the hex-encoded SHA256 of the model file — this is the only
-// tamper-proof information that proves the worker has the correct model loaded.
-func ComputeLLMHash(role, modelFileHash string) string {
-	h := sha256.Sum256([]byte(role + ":" + modelFileHash))
-	return hex.EncodeToString(h[:])
-}
 
 // Worker represents a registered worker in the cluster.
 type Worker struct {

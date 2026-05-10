@@ -29,7 +29,7 @@ import (
 	"github.com/ylallemant/synergia/internal/client/gpu"
 	"github.com/ylallemant/synergia/internal/client/identity"
 	"github.com/ylallemant/synergia/internal/client/llm"
-	"github.com/ylallemant/synergia/internal/client/protocol"
+	"github.com/ylallemant/synergia/internal/protocol"
 	"github.com/ylallemant/synergia/internal/client/server"
 	"github.com/ylallemant/synergia/internal/client/status"
 	"github.com/ylallemant/synergia/internal/client/tray"

@@ -57,6 +57,16 @@ Minimal implementation: connects to a single cluster manager, shells out to a lo
 
 #### Path: eliminate `CLUSTER_WORKER_KEY`
 
+##### Option A — Keep shared key (no TOFU)
+
+If the administrator does not want TOFU, worker key authentication remains active. The key is embedded Base64-encoded in a sentinel placeholder (like the manager URL sentinel), patched into the binary at distribution time. Not encrypted — Base64 avoids the raw key appearing as readable plaintext in binary analysis tools, but the key is trivially recoverable by anyone who has the binary. The actual protection is operational: the binary is trusted distribution infrastructure.
+
+Precedence: `CLUSTER_WORKER_KEY` env var (development / CI) > binary sentinel.
+
+##### Option B — TOFU (no shared key)
+
+If the administrator wants TOFU, the worker key sentinel remains empty (zero bytes) and the following challenge-response flow applies instead:
+
 The client already has a persistent Ed25519 identity (`identity.enc` / `identity.pub`). The shared key can be replaced by a cryptographic challenge-response handshake:
 
 ```
@@ -391,7 +401,6 @@ cmd/synergia-client/ + internal/client/
 | Flag / Env | Default | Description |
 |---|---|---|
 | `--manager-url` / `CLUSTER_MANAGER_URL` | (from binary sentinel or empty) | WebSocket URL of the cluster manager. If empty, the client starts in unconfigured mode and prompts via the dashboard |
-| `--worker-key` / `CLUSTER_WORKER_KEY` | (required) | Shared secret for WebSocket auth |
 | `--llm-url` / `WORKER_LLM_URL` | `http://localhost:8080` | Local `llama-server` endpoint |
 | `--model` / `WORKER_MODEL` | (required) | Model name to report (e.g., `mistral-small-3.2-24b-instruct-2506`) |
 | `--quantisation` / `WORKER_QUANTISATION` | `Q4_K_M` | Quantisation level to report |
@@ -711,19 +720,19 @@ The client does **not** exit or refuse to start when `llama-server` is unavailab
 ## Processing Loop
 
 ```
-┌─────────────────────────────────────────────────┐
-│                 Cluster Client                   │
-│                                                 │
-│  1. Connect WSS to cluster manager              │
-│  2. Wait for work_unit message                  │
-│  3. Forward messages[] to local llama-server    │
-│     POST http://localhost:8080/v1/chat/completions
-│  4. Read response                               │
-│  5. Send result message back over WSS           │
-│  6. Go to 2                                     │
-│                                                 │
-│  (heartbeat every 30s in background goroutine)  │
-└─────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│                 Cluster Client                     │
+│                                                    │
+│  1. Connect WSS to cluster manager                 │
+│  2. Wait for work_unit message                     │
+│  3. Forward messages[] to local llama-server       │
+│     POST http://localhost:8080/v1/chat/completions │
+│  4. Read response                                  │
+│  5. Send result message back over WSS              │
+│  6. Go to 2                                        │
+│                                                    │
+│  (heartbeat every 30s in background goroutine)     │
+└────────────────────────────────────────────────────┘
 ```
 
 ## GPU Activity Monitoring
@@ -793,9 +802,8 @@ llama-server --model ~/.synergia/models/mistral-small-3.2.gguf --port 8080
 
 # Run the cluster client
 cd tools/synergia-client
-go run ./cmd/synergia-client \
+CLUSTER_WORKER_KEY=my-secret go run ./cmd/synergia-client \
   --manager-url wss://localhost:7500/ws/worker \
-  --worker-key my-secret \
   --llm-url http://localhost:8080 \
   --model mistral-small-3.2-24b-instruct-2506 \
   --quantisation Q4_K_M

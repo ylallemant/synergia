@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
@@ -8,7 +9,7 @@ import (
 	"time"
 )
 
-// DefaultManagerURL is a fixed-size sentinel that can be replaced at binary distribution time.
+// DefaultManagerURL is a fixed-size sentinel replaced at binary distribution time.
 // The manager's download endpoint patches this with the real WSS URL (null-padded to 256 bytes).
 // If still set to the sentinel (or empty), the client starts in unconfigured mode.
 var DefaultManagerURL = buildDefaultManagerURL()
@@ -19,9 +20,7 @@ var defaultManagerURLSentinelBytes = []byte{
 	'$', '$', 'S', 'Y', 'N', 'E', 'R', 'G', 'I', 'A', '_', 'M', 'A', 'N', 'A', 'G', 'E', 'R', '_', 'U', 'R', 'L', '$', '$',
 }
 
-func defaultManagerURLSentinel() string {
-	return string(defaultManagerURLSentinelBytes)
-}
+func defaultManagerURLSentinel() string { return string(defaultManagerURLSentinelBytes) }
 
 func buildDefaultManagerURL() string {
 	data := make([]byte, defaultManagerURLSentinelSize)
@@ -29,12 +28,7 @@ func buildDefaultManagerURL() string {
 	return string(data)
 }
 
-// resolveManagerURL returns the effective manager URL from (in priority order):
-// 1. CLI flag / env var (if non-empty and not the sentinel)
-// 2. Patched sentinel value (if patched)
-// 3. Empty string (unconfigured)
 func resolveManagerURL() string {
-	// Strip null padding from sentinel
 	url := strings.TrimRight(DefaultManagerURL, "\x00")
 	if url == defaultManagerURLSentinel() || url == "" {
 		return ""
@@ -42,9 +36,49 @@ func resolveManagerURL() string {
 	return url
 }
 
+// DefaultWorkerKey is a fixed-size sentinel replaced at binary distribution time.
+// The manager's download endpoint patches this with a Base64-encoded worker key
+// (null-padded to 96 bytes) for key-auth deployments.
+// If the sentinel is unpatched (still the placeholder or all nulls), the client
+// uses TOFU mode — no key is sent and the challenge-response handshake authenticates instead.
+var DefaultWorkerKey = buildDefaultWorkerKey()
+
+const defaultWorkerKeySentinelSize = 96
+
+var defaultWorkerKeySentinelBytes = []byte{
+	'$', '$', 'S', 'Y', 'N', 'E', 'R', 'G', 'I', 'A', '_', 'W', 'O', 'R', 'K', 'E', 'R', '_', 'K', 'E', 'Y', '$', '$',
+}
+
+func defaultWorkerKeySentinel() string { return string(defaultWorkerKeySentinelBytes) }
+
+func buildDefaultWorkerKey() string {
+	data := make([]byte, defaultWorkerKeySentinelSize)
+	copy(data, defaultWorkerKeySentinelBytes)
+	return string(data)
+}
+
+// resolveWorkerKey returns the effective worker key in priority order:
+// 1. CLUSTER_WORKER_KEY env var (development / CI override)
+// 2. Base64-decoded binary sentinel (patched at distribution time by the manager)
+// 3. Empty string — TOFU mode, no key sent, challenge-response auth is used instead
+func resolveWorkerKey() string {
+	if v := os.Getenv("CLUSTER_WORKER_KEY"); v != "" {
+		return v
+	}
+	raw := strings.TrimRight(DefaultWorkerKey, "\x00")
+	if raw == defaultWorkerKeySentinel() || raw == "" {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return ""
+	}
+	return string(decoded)
+}
+
 type Config struct {
 	ManagerURL          string
-	WorkerKey           string
+	WorkerKey           string // empty = TOFU mode; set = key-auth mode
 	LLMURL              string
 	Model               string
 	Quantisation        string
@@ -63,11 +97,9 @@ type Config struct {
 func Load() (*Config, error) {
 	cfg := &Config{}
 
-	// Resolve the effective default: env var > patched sentinel > empty
 	defaultURL := envOrDefault("CLUSTER_MANAGER_URL", resolveManagerURL())
 
 	flag.StringVar(&cfg.ManagerURL, "manager-url", defaultURL, "WebSocket URL of the cluster manager")
-	flag.StringVar(&cfg.WorkerKey, "worker-key", os.Getenv("CLUSTER_WORKER_KEY"), "Shared secret for WebSocket auth")
 	flag.StringVar(&cfg.LLMURL, "llm-url", envOrDefault("WORKER_LLM_URL", "http://localhost:8080"), "Local llama-server endpoint")
 	flag.StringVar(&cfg.Model, "model", envOrDefault("WORKER_MODEL", "SmolLM2-135M-Instruct"), "Model name to report")
 	flag.StringVar(&cfg.Quantisation, "quantisation", envOrDefault("WORKER_QUANTISATION", "Q4_K_M"), "Quantisation level to report")
@@ -86,7 +118,6 @@ func Load() (*Config, error) {
 
 	flag.Parse()
 
-	// Parse durations after flag.Parse
 	var err error
 	cfg.GPUMonitorInterval, err = time.ParseDuration(gpuInterval)
 	if err != nil {
@@ -97,12 +128,10 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid --gpu-resume-delay %q: %w", gpuResume, err)
 	}
 
-	// Validate required fields
-	// Check for a saved manager-url file (from setup mode)
+	// Resolve manager URL from saved file if not set
 	if cfg.ManagerURL == "" {
 		if saved, err := os.ReadFile(cfg.DataDir + "/manager-url"); err == nil {
-			url := strings.TrimSpace(string(saved))
-			if url != "" {
+			if url := strings.TrimSpace(string(saved)); url != "" {
 				cfg.ManagerURL = url
 			}
 		}
@@ -110,12 +139,11 @@ func Load() (*Config, error) {
 
 	if cfg.ManagerURL == "" {
 		cfg.Unconfigured = true
-		// In unconfigured mode, relax other requirements
 		return cfg, nil
 	}
-	if cfg.WorkerKey == "" {
-		return nil, fmt.Errorf("--worker-key or CLUSTER_WORKER_KEY is required")
-	}
+
+	// Worker key: sentinel → env var → empty (TOFU mode)
+	cfg.WorkerKey = resolveWorkerKey()
 
 	return cfg, nil
 }

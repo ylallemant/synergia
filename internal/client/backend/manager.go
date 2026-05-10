@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
-	"github.com/ylallemant/synergia/internal/client/protocol"
+	"github.com/ylallemant/synergia/internal/protocol"
 )
 
 // Manager handles downloading and managing the llama-server backend binary.

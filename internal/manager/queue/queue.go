@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ylallemant/synergia/internal/manager/protocol"
+	"github.com/ylallemant/synergia/internal/protocol"
 )
 
 // PendingUnit tracks a dispatched work unit awaiting a result.
