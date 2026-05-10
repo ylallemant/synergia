@@ -65,11 +65,15 @@ func New(workerKey string, q *queue.Queue, s *store.Store) *Gateway {
 
 // ServeHTTP handles the WebSocket upgrade for /ws/worker.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Authenticate worker
+	// Auth mode:
+	//   key-auth — workerKey configured: Bearer token must match before upgrade
+	//   TOFU     — workerKey empty: challenge-response after upgrade
 	authHeader := r.Header.Get("Authorization")
-	if authHeader != "Bearer "+g.workerKey {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+	if g.workerKey != "" {
+		if authHeader != "Bearer "+g.workerKey {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	// Extract worker identity
@@ -119,6 +123,19 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Error().Err(err).Msg("websocket upgrade failed")
 		return
+	}
+
+	if g.workerKey == "" {
+		// TOFU mode: challenge-response after upgrade
+		log.Debug().Str("fingerprint", fingerprint).Msg("handshake: TOFU mode — sending challenge")
+		if !doChallenge(conn, pubKey) {
+			log.Warn().Str("fingerprint", fingerprint).Msg("handshake: TOFU challenge-response failed — closing connection")
+			conn.Close()
+			return
+		}
+		log.Info().Str("fingerprint", fingerprint).Msg("handshake: TOFU challenge-response succeeded")
+	} else {
+		log.Debug().Str("fingerprint", fingerprint).Msg("handshake: key-auth mode — Bearer token accepted")
 	}
 
 	wc := &workerConn{

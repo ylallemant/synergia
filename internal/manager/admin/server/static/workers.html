@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workers — Synergia Admin</title>
+<link rel="stylesheet" href="/static/default.css">
+</head>
+<body>
+
+<nav class="top-nav">
+  <a class="nav-brand" href="/">Synergia Admin</a>
+  <button class="nav-burger" id="navToggle" aria-label="Open menu">
+    <span></span><span></span><span></span>
+  </button>
+</nav>
+<div class="nav-overlay" id="navOverlay"></div>
+<aside class="nav-panel" id="navPanel">
+  <button class="nav-close" id="navClose" aria-label="Close menu">&#x2715;</button>
+  <nav class="nav-links">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/admin/workers" class="nav-link active">Workers</a>
+    <a href="/admin/inference" class="nav-link">Inference</a>
+    <a href="/admin/oidc" class="nav-link">OIDC Settings</a>
+    <div class="nav-divider"></div>
+    <a href="/logout" class="nav-link nav-link-danger">Log out</a>
+  </nav>
+</aside>
+
+<h1>Workers</h1>
+
+<!-- ── Authentication ──────────────────────────────────────────────────────── -->
+<h2>Authentication</h2>
+<p class="page-subtitle">Configure how workers authenticate when connecting. Changes take effect on the next restart.</p>
+
+<div id="workersActiveNotice" class="notice notice-ok" style="display:none"></div>
+
+<div class="form-section">
+  <form id="workersForm" class="admin-form">
+    <div class="form-row">
+      <label for="tofu_enabled">TOFU mode</label>
+      <label class="toggle">
+        <input type="checkbox" id="tofu_enabled">
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <p class="field-hint">
+      When <strong>on</strong>: workers authenticate via Ed25519 challenge-response — no shared secret required.
+      When <strong>off</strong>: workers must present the shared worker key configured below.
+    </p>
+
+    <div id="keyBlock">
+      <div class="form-row">
+        <label for="worker_key">Worker Key</label>
+        <div class="input-with-btn">
+          <input type="password" id="worker_key" placeholder="leave blank to keep existing key">
+          <button type="button" class="btn-small" id="toggleWorkerKey" title="Show / hide">&#128065;</button>
+        </div>
+      </div>
+      <p class="field-hint">The shared secret workers must present on WebSocket connect. Leave blank to keep the currently stored key unchanged.</p>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Save</button>
+      <span id="workersSaveStatus" class="status-msg"></span>
+      <span id="workersUpdatedAt" class="field-hint" style="margin-left:auto;padding-left:0"></span>
+    </div>
+  </form>
+</div>
+
+<!-- ── Client Binary Version ───────────────────────────────────────────────── -->
+<h2>Client Binary Version</h2>
+<div class="form-section">
+  <form id="versionForm" class="admin-form">
+    <div class="form-row">
+      <label for="ver_target">Target Version</label>
+      <div class="input-with-btn">
+        <select id="ver_target" name="target_version"></select>
+        <button type="button" id="refreshClientTagsBtn" class="btn-small" title="Refresh tags from GitHub">↻</button>
+        <a id="clientReleaseLink" class="btn-small" target="_blank" rel="noopener" title="Open release page" style="display:none">↗</a>
+      </div>
+    </div>
+    <div class="form-row">
+      <label for="ver_rollout">Rollout Mode</label>
+      <select id="ver_rollout" name="rollout_mode">
+        <option value="all">all</option>
+        <option value="percentage">percentage</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label for="ver_pct">Rollout %</label>
+      <input type="number" id="ver_pct" name="rollout_percentage" min="1" max="100" value="100">
+    </div>
+    <div class="form-row">
+      <label for="ver_sha">SHA256 (optional)</label>
+      <input type="text" id="ver_sha" name="sha256" placeholder="hex digest">
+    </div>
+    <div class="form-actions">
+      <button type="submit">Save &amp; Push</button>
+      <span id="versionStatus" class="status-msg"></span>
+    </div>
+  </form>
+  <div id="versionSyncGrid" class="grid sync-grid" style="display:none">
+    <div class="card"><div class="label">Synced</div><div class="value green" id="verSynced">—</div></div>
+    <div class="card"><div class="label">Out of Sync</div><div class="value yellow" id="verOutdated">—</div></div>
+  </div>
+</div>
+
+<div class="footer">Synergia Cluster Manager</div>
+
+<script>
+const API_KEY = "{{.APIKey}}";
+const headers = {"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"};
+
+// --- Nav ---
+function openNav()  { document.getElementById("navPanel").classList.add("open");  document.getElementById("navOverlay").classList.add("show"); }
+function closeNav() { document.getElementById("navPanel").classList.remove("open"); document.getElementById("navOverlay").classList.remove("show"); }
+document.getElementById("navToggle").addEventListener("click", openNav);
+document.getElementById("navClose").addEventListener("click", closeNav);
+document.getElementById("navOverlay").addEventListener("click", closeNav);
+
+function showStatus(el, msg, ok) {
+  el.textContent = msg;
+  el.className = "status-msg " + (ok ? "ok" : "err");
+  setTimeout(() => { el.textContent = ""; el.className = "status-msg"; }, 5000);
+}
+
+// ── Auth config ────────────────────────────────────────────────────────────
+document.getElementById("toggleWorkerKey").addEventListener("click", () => {
+  const f = document.getElementById("worker_key");
+  f.type = f.type === "password" ? "text" : "password";
+});
+
+function updateKeyBlock() {
+  document.getElementById("keyBlock").style.display =
+    document.getElementById("tofu_enabled").checked ? "none" : "";
+}
+document.getElementById("tofu_enabled").addEventListener("change", updateKeyBlock);
+
+async function loadAuthConfig() {
+  try {
+    const resp = await fetch("/v1/admin/workers", {headers});
+    if (!resp.ok) { updateKeyBlock(); return; }
+    const cfg = await resp.json();
+    if (!cfg.is_configured) { updateKeyBlock(); return; }
+    document.getElementById("tofu_enabled").checked = cfg.tofu_enabled;
+    if (cfg.worker_key) document.getElementById("worker_key").placeholder = "(key stored — leave blank to keep)";
+    if (cfg.updated_at) document.getElementById("workersUpdatedAt").textContent = "Last saved: " + new Date(cfg.updated_at).toLocaleString();
+    const notice = document.getElementById("workersActiveNotice");
+    notice.textContent = cfg.tofu_enabled
+      ? "TOFU mode is currently active. Workers authenticate via challenge-response."
+      : cfg.worker_key ? "Key-auth mode is currently active. Workers must present the shared worker key." : "";
+    if (notice.textContent) notice.style.display = "";
+    updateKeyBlock();
+  } catch(e) { console.error("Failed to load auth config:", e); }
+}
+loadAuthConfig();
+
+document.getElementById("workersForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const status = document.getElementById("workersSaveStatus");
+  const body = { tofu_enabled: document.getElementById("tofu_enabled").checked, worker_key: document.getElementById("worker_key").value };
+  try {
+    const resp = await fetch("/v1/admin/workers", {method: "PUT", headers, body: JSON.stringify(body)});
+    if (resp.ok) {
+      showStatus(status, "Saved ✓ — restart to apply", true);
+      document.getElementById("worker_key").value = "";
+      document.getElementById("worker_key").placeholder = "(key stored — leave blank to keep)";
+      document.getElementById("workersUpdatedAt").textContent = "Last saved: " + new Date().toLocaleString();
+    } else { showStatus(status, "Error " + resp.status + ": " + await resp.text(), false); }
+  } catch(err) { showStatus(status, "Network error: " + err.message, false); }
+});
+
+// ── Client version ─────────────────────────────────────────────────────────
+async function loadVersionConfig() {
+  try {
+    const resp = await fetch("/v1/admin/version", {headers});
+    if (!resp.ok) return;
+    const cfg = await resp.json();
+    if (cfg.target_version) {
+      const sel = document.getElementById("ver_target");
+      sel.innerHTML = `<option value="${cfg.target_version}" selected>${cfg.target_version}</option>`;
+    }
+    if (cfg.rollout_mode) {
+      document.getElementById("ver_rollout").value = cfg.rollout_mode;
+    }
+    if (cfg.rollout_percentage) {
+      document.getElementById("ver_pct").value = cfg.rollout_percentage;
+    }
+  } catch(e) { console.error("Failed to load version config:", e); }
+}
+loadVersionConfig();
+
+async function refreshClientTags() {
+  const btn = document.getElementById("refreshClientTagsBtn");
+  const sel = document.getElementById("ver_target");
+  const currentVal = sel.value;
+  btn.disabled = true; btn.textContent = "…";
+  try {
+    const resp = await fetch("/v1/admin/version/tags?limit=20", {headers});
+    if (!resp.ok) { btn.title = "Failed: " + resp.status; return; }
+    const data = await resp.json();
+    sel.innerHTML = "";
+    if (data.tags && data.tags.length > 0) {
+      for (const tag of data.tags) {
+        const opt = document.createElement("option");
+        opt.value = tag; opt.textContent = tag;
+        if (tag === currentVal) opt.selected = true;
+        sel.appendChild(opt);
+      }
+    } else {
+      sel.innerHTML = '<option value="">(no tags found)</option>';
+    }
+  } catch(err) { btn.title = "Error: " + err.message; }
+  finally { btn.disabled = false; btn.textContent = "↻"; }
+  updateClientReleaseLink();
+}
+
+function updateClientReleaseLink() {
+  const version = document.getElementById("ver_target").value;
+  const link = document.getElementById("clientReleaseLink");
+  if (version) {
+    link.href = "https://github.com/ylallemant/synergia/releases/tag/" + encodeURIComponent(version);
+    link.style.display = "";
+  } else {
+    link.removeAttribute("href"); link.style.display = "none";
+  }
+}
+
+document.getElementById("refreshClientTagsBtn").addEventListener("click", refreshClientTags);
+document.getElementById("ver_target").addEventListener("change", updateClientReleaseLink);
+refreshClientTags();
+
+document.getElementById("versionForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const status = document.getElementById("versionStatus");
+  const body = {
+    target_version: document.getElementById("ver_target").value,
+    rollout_mode: document.getElementById("ver_rollout").value,
+    rollout_percentage: parseInt(document.getElementById("ver_pct").value) || 100,
+    sha256: document.getElementById("ver_sha").value
+  };
+  try {
+    const resp = await fetch("/v1/admin/version", {method: "POST", headers, body: JSON.stringify(body)});
+    if (resp.ok) { showStatus(status, "Saved ✓", true); }
+    else { showStatus(status, "Error: " + resp.status + " " + await resp.text(), false); }
+  } catch(err) { showStatus(status, "Network error: " + err.message, false); }
+});
+</script>
+</body>
+</html>

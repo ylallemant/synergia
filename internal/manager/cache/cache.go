@@ -51,6 +51,11 @@ type DashboardStats struct {
 	BackendSHA256Full  string
 	BackendSynced      int64
 	BackendOutdated    int64
+	// ModelSynced / ModelOutOfSync count non-offline workers by LLM model sync status.
+	// A worker is model-synced when its reported llm_hash matches the expected hash
+	// for its role. This is what directly gates work dispatch.
+	ModelSynced    int64
+	ModelOutOfSync int64
 	Roles              []RoleEntry
 }
 
@@ -172,6 +177,10 @@ func (c *Cache) refreshStats() {
 	db.Model(&store.Worker{}).Where("status = ? AND sync_status = ?", "processing", "synced").Count(&stats.ProcessingWorkers)
 	db.Model(&store.Worker{}).Where("status != ? AND NOT (status IN ? AND sync_status = ?) AND NOT (status = ? AND sync_status = ?)", "offline", []string{"available", "online"}, "synced", "processing", "synced").Count(&stats.UnavailableWorkers)
 	db.Model(&store.Worker{}).Where("status = ?", "offline").Count(&stats.OfflineWorkers)
+
+	// LLM model sync — independent of binary/backend version targets
+	db.Model(&store.Worker{}).Where("status != ? AND sync_status = ?", "offline", "synced").Count(&stats.ModelSynced)
+	db.Model(&store.Worker{}).Where("status != ? AND sync_status = ?", "offline", "out-of-sync").Count(&stats.ModelOutOfSync)
 
 	// Workers by role
 	type roleRow struct {

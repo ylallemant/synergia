@@ -364,12 +364,131 @@ func main() {
 	}
 	pass("Client registered with manager")
 
+	// Verify key-auth mode was used
+	if err := waitForLog(managerLogs, "key-auth mode — Bearer token accepted", 5*time.Second); err != nil {
+		log.Warn().Msg("key-auth handshake log not found in manager (non-fatal)")
+	} else {
+		pass("Manager: key-auth handshake confirmed in logs")
+	}
+
 	// Verify client-side logs
 	if err := waitForLog(clientLogs, "connected to cluster manager", 10*time.Second); err != nil {
 		clientLogs.Dump(os.Stderr)
 		fatal("client did not confirm connection: %v", err)
 	}
 	pass("Client confirms connection")
+
+	// --- Step 7b: TOFU challenge-response handshake ---
+	step("7b. Testing TOFU challenge-response worker authentication")
+	{
+		tofuManagerAddr := "127.0.0.1:7510"
+		tofuManagerAdminAddr := "127.0.0.1:7511"
+
+		// Pre-flight: ensure TOFU test ports are free
+		for _, addr := range []string{tofuManagerAddr, tofuManagerAdminAddr} {
+			if ln, err := net.Listen("tcp", addr); err != nil {
+				fatal("TOFU test port %s is already in use", addr)
+			} else {
+				ln.Close()
+			}
+		}
+
+		tofuManagerLogs := newLogBuffer("tofu-manager", logDir)
+		defer tofuManagerLogs.Close()
+		tofuManagerCmd := exec.Command("go", "run", "./cmd/synergia-manager")
+		tofuManagerCmd.Dir = repoRoot
+		tofuManagerCmd.Env = append(os.Environ(),
+			"CLUSTER_LISTEN_ADDR="+tofuManagerAddr,
+			"CLUSTER_API_KEY="+apiKey,
+			// No CLUSTER_WORKER_KEY → TOFU mode
+			"CLUSTER_MODEL_BACKEND=filesystem",
+			"CLUSTER_MODEL_PATH="+modelsDir,
+			"CLUSTER_DB_PATH="+filepath.Join(dataDir, "tofu-manager.db"),
+			"CLUSTER_TEST_SETUP=true",
+			"CLUSTER_ADMIN_ADDR="+tofuManagerAdminAddr,
+			"TLS_CERT_FILE="+serverCertPath,
+			"TLS_KEY_FILE="+serverKeyPath,
+			"CLUSTER_ADMIN_USER="+adminUser,
+			"CLUSTER_ADMIN_PASSWORD="+adminPassword,
+			"LOG_LEVEL=debug",
+		)
+		tofuManagerCmd.Stdout = tofuManagerLogs
+		tofuManagerCmd.Stderr = tofuManagerLogs
+		if err := tofuManagerCmd.Start(); err != nil {
+			fatal("start tofu-manager: %v", err)
+		}
+		defer cleanup("tofu-manager", tofuManagerCmd)
+
+		if err := waitForHTTP("https://"+tofuManagerAddr+"/healthz", 30*time.Second); err != nil {
+			tofuManagerLogs.Dump(os.Stderr)
+			fatal("tofu-manager did not become ready: %v", err)
+		}
+		pass("TOFU manager ready on %s (TLS, no worker key)", tofuManagerAddr)
+
+		tofuClientDataDir := filepath.Join(dataDir, "tofu-client-data")
+		tofuClientLogs := newLogBuffer("tofu-client", logDir)
+		defer tofuClientLogs.Close()
+		tofuClientCmd := exec.Command("go", "run", "./cmd/synergia-client",
+			"--manager-url", "wss://"+tofuManagerAddr+"/ws/worker",
+			"--llm-url", "http://127.0.0.1:"+llamaServerPort,
+			"--model", testModelName,
+			"--quantisation", testQuantisation,
+			"--role", "tester",
+			"--model-file", modelPath,
+			"--data-dir", tofuClientDataDir,
+			"--auto-approve",
+			"--tls-ca-cert", caCertPath,
+		)
+		tofuClientCmd.Dir = repoRoot
+		// No CLUSTER_WORKER_KEY → TOFU mode
+		tofuClientCmd.Env = append(os.Environ(), "LOG_LEVEL=debug")
+		tofuClientCmd.Stdout = tofuClientLogs
+		tofuClientCmd.Stderr = tofuClientLogs
+		if err := tofuClientCmd.Start(); err != nil {
+			fatal("start tofu-client: %v", err)
+		}
+		defer cleanup("tofu-client", tofuClientCmd)
+
+		// Client should log TOFU mode selection
+		if err := waitForLog(tofuClientLogs, "TOFU mode — awaiting challenge", 15*time.Second); err != nil {
+			tofuClientLogs.Dump(os.Stderr)
+			fatal("tofu-client did not log TOFU mode selection: %v", err)
+		}
+		pass("Client: TOFU mode selected (no worker key)")
+
+		// Manager should log challenge sent
+		if err := waitForLog(tofuManagerLogs, "handshake: TOFU mode — sending challenge", 15*time.Second); err != nil {
+			tofuManagerLogs.Dump(os.Stderr)
+			fatal("tofu-manager did not send challenge: %v", err)
+		}
+		pass("Manager: challenge sent to worker")
+
+		// Client should log challenge received and signed
+		if err := waitForLog(tofuClientLogs, "handshake: challenge received, signing nonce", 10*time.Second); err != nil {
+			tofuClientLogs.Dump(os.Stderr)
+			fatal("tofu-client did not receive/sign challenge: %v", err)
+		}
+		pass("Client: nonce signed")
+
+		if err := waitForLog(tofuClientLogs, "handshake: challenge-response completed", 5*time.Second); err != nil {
+			tofuClientLogs.Dump(os.Stderr)
+			fatal("tofu-client did not complete handshake: %v", err)
+		}
+		pass("Client: challenge-response completed")
+
+		// Manager should confirm success
+		if err := waitForLog(tofuManagerLogs, "handshake: TOFU challenge-response succeeded", 10*time.Second); err != nil {
+			tofuManagerLogs.Dump(os.Stderr)
+			fatal("tofu-manager did not confirm handshake success: %v", err)
+		}
+		pass("Manager: TOFU challenge-response succeeded")
+
+		if err := waitForLog(tofuManagerLogs, "worker connected", 10*time.Second); err != nil {
+			tofuManagerLogs.Dump(os.Stderr)
+			fatal("tofu-manager: worker did not register after TOFU handshake: %v", err)
+		}
+		pass("TOFU worker registered with manager")
+	}
 
 	// --- Step 8: Check worker appears in API ---
 	step("8. Verifying worker in cluster API")

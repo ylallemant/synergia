@@ -95,9 +95,7 @@ func Load() (*Config, error) {
 	if cfg.APIKey == "" {
 		return nil, fmt.Errorf("CLUSTER_API_KEY is required")
 	}
-	if cfg.WorkerKey == "" {
-		return nil, fmt.Errorf("CLUSTER_WORKER_KEY is required")
-	}
+	// WorkerKey is optional: empty = TOFU mode (Ed25519 challenge-response), non-empty = key-auth mode.
 	if !cfg.Insecure {
 		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
 			return nil, fmt.Errorf("TLS_CERT_FILE and TLS_KEY_FILE are required (set CLUSTER_INSECURE=true to disable TLS)")

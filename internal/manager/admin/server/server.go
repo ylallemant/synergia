@@ -20,6 +20,8 @@ var staticFS embed.FS
 
 var dashboardTmpl = template.Must(template.ParseFS(staticFS, "static/index.html"))
 var oidcTmpl = template.Must(template.ParseFS(staticFS, "static/oidc.html"))
+var workersTmpl = template.Must(template.ParseFS(staticFS, "static/workers.html"))
+var inferenceTmpl = template.Must(template.ParseFS(staticFS, "static/inference.html"))
 
 // Server serves the admin dashboard and additional admin API routes.
 type Server struct {
@@ -68,8 +70,10 @@ func New(addr, apiKey string, s *store.Store, c *cache.Cache, insecure bool, tls
 		srv.mux.HandleFunc("/auth/oidc/callback", srv.auth.OIDCCallbackHandler)
 	}
 
-	// Dashboard and OIDC settings page
+	// Dashboard and settings pages
 	srv.mux.HandleFunc("/", srv.auth.RequireAuth(srv.dashboardHandler))
+	srv.mux.HandleFunc("/admin/workers", srv.auth.RequireAuth(srv.workersHandler))
+	srv.mux.HandleFunc("/admin/inference", srv.auth.RequireAuth(srv.inferenceHandler))
 	srv.mux.HandleFunc("/admin/oidc", srv.auth.RequireAuth(srv.oidcHandler))
 
 	return srv
@@ -116,9 +120,35 @@ func (s *Server) Run(ctx context.Context) {
 	}
 }
 
-type oidcPageData struct {
+type pageData struct {
 	APIKey string
 }
+
+// inferenceHandler serves GET /admin/inference — the inference settings page.
+func (s *Server) inferenceHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := inferenceTmpl.Execute(w, pageData{APIKey: s.apiKey}); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
+}
+
+// workersHandler serves GET /admin/workers — the worker authentication settings page.
+func (s *Server) workersHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := workersTmpl.Execute(w, pageData{APIKey: s.apiKey}); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
+}
+
+type oidcPageData = pageData
 
 // oidcHandler serves GET /admin/oidc — the OIDC settings page.
 func (s *Server) oidcHandler(w http.ResponseWriter, r *http.Request) {
@@ -126,9 +156,8 @@ func (s *Server) oidcHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	data := oidcPageData{APIKey: s.apiKey}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := oidcTmpl.Execute(w, data); err != nil {
+	if err := oidcTmpl.Execute(w, pageData{APIKey: s.apiKey}); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }
@@ -200,6 +229,8 @@ func (s *Server) collectData() dashboardData {
 	data.BackendSHA256 = sha
 	data.BackendSynced = stats.BackendSynced
 	data.BackendOutdated = stats.BackendOutdated
+	data.ModelSynced = stats.ModelSynced
+	data.ModelOutOfSync = stats.ModelOutOfSync
 
 	for _, r := range stats.Roles {
 		data.Roles = append(data.Roles, roleEntry{
@@ -245,6 +276,8 @@ type dashboardData struct {
 	BackendSHA256      string
 	BackendSynced      int64
 	BackendOutdated    int64
+	ModelSynced        int64
+	ModelOutOfSync     int64
 	Roles              []roleEntry
 	GeneratedAt        string
 }

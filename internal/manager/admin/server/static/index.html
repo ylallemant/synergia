@@ -19,6 +19,8 @@
   <button class="nav-close" id="navClose" aria-label="Close menu">&#x2715;</button>
   <nav class="nav-links">
     <a href="/" class="nav-link active">Dashboard</a>
+    <a href="/admin/workers" class="nav-link">Workers</a>
+    <a href="/admin/inference" class="nav-link">Inference</a>
     <a href="/admin/oidc" class="nav-link">OIDC Settings</a>
     <div class="nav-divider"></div>
     <a href="/logout" class="nav-link nav-link-danger">Log out</a>
@@ -47,7 +49,7 @@
 </table>
 {{else}}<p class="empty">No role assignments yet.</p>{{end}}
 
-<h2>Payloads Units — Today</h2>
+<h2>Payloads — Today</h2>
 <div class="grid">
   <div class="card"><div class="label">Total</div><div class="value blue">{{.TodayTotal}}</div></div>
   <div class="card"><div class="label">Completed</div><div class="value green">{{.TodayCompleted}}</div></div>
@@ -57,7 +59,7 @@
 </div>
 
 {{if .RoleWorkCounts}}
-<h2>Payloads by Types — Today</h2>
+<h2>Payloads by Type — Today</h2>
 <table>
 <thead><tr><th>Role</th><th>Requests</th></tr></thead>
 <tbody>
@@ -65,6 +67,13 @@
 {{end}}</tbody>
 </table>
 {{end}}
+
+<h2>Model Sync</h2>
+<p class="section-hint">Workers with the correct LLM model loaded for their role — what directly gates work dispatch regardless of availability state.</p>
+<div class="grid sync-grid">
+  <div class="card"><div class="label">Synced</div><div class="value green">{{.ModelSynced}}</div></div>
+  <div class="card"><div class="label">Out of Sync</div><div class="value yellow">{{.ModelOutOfSync}}</div></div>
+</div>
 
 <h2>Recent Client Errors (last 10)</h2>
 {{if .Errors}}
@@ -77,115 +86,6 @@
 {{else}}<p class="empty">No errors recorded.</p>{{end}}
 </div><!-- /live-stats -->
 
-<h2>Client Binary Version</h2>
-<div class="form-section">
-  <form id="versionForm" class="admin-form">
-    <div class="form-row">
-      <label for="ver_target">Target Version</label>
-      <div class="input-with-btn">
-        <select id="ver_target" name="target_version">
-          {{if .VersionTarget}}<option value="{{.VersionTarget}}" selected>{{.VersionTarget}}</option>{{end}}
-        </select>
-        <button type="button" id="refreshClientTagsBtn" class="btn-small" title="Refresh tags from GitHub">↻</button>
-        <a id="clientReleaseLink" class="btn-small" target="_blank" rel="noopener" title="Open release page">↗</a>
-      </div>
-    </div>
-    <div class="form-row">
-      <label for="ver_rollout">Rollout Mode</label>
-      <select id="ver_rollout" name="rollout_mode">
-        <option value="all" {{if eq .VersionRolloutMode "all"}}selected{{end}}>all</option>
-        <option value="percentage" {{if eq .VersionRolloutMode "percentage"}}selected{{end}}>percentage</option>
-      </select>
-    </div>
-    <div class="form-row">
-      <label for="ver_pct">Rollout %</label>
-      <input type="number" id="ver_pct" name="rollout_percentage" min="1" max="100" value="{{.VersionPercentage}}">
-    </div>
-    <div class="form-row">
-      <label for="ver_sha">SHA256 (optional)</label>
-      <input type="text" id="ver_sha" name="sha256" value="{{.VersionSHA256}}" placeholder="hex digest">
-    </div>
-    <div class="form-actions">
-      <button type="submit">Save &amp; Push</button>
-      <span id="versionStatus" class="status-msg"></span>
-    </div>
-  </form>
-  {{if .VersionTarget}}
-  <div class="grid sync-grid">
-    <div class="card"><div class="label">Synced</div><div class="value green">{{.WorkersSynced}}</div></div>
-    <div class="card"><div class="label">Outdated</div><div class="value yellow">{{.WorkersOutdated}}</div></div>
-  </div>
-  {{end}}
-</div>
-
-<h2>Inference Backend Version</h2>
-<div class="form-section">
-  <form id="backendForm" class="admin-form">
-    <div class="form-row">
-      <label for="be_name">Backend</label>
-      <select id="be_name" name="name">
-        <option value="llama.cpp" {{if eq .BackendName "llama.cpp"}}selected{{end}}>llama.cpp</option>
-      </select>
-    </div>
-    <div class="form-row">
-      <label for="be_version">Version</label>
-      <div class="input-with-btn">
-        <select id="be_version" name="version">
-          {{if .BackendVersion}}<option value="{{.BackendVersion}}" selected>{{.BackendVersion}}</option>{{end}}
-        </select>
-        <button type="button" id="refreshTagsBtn" class="btn-small" title="Refresh tags from GitHub">↻</button>
-        <a id="releaseLink" class="btn-small" target="_blank" rel="noopener" title="Open release page">↗</a>
-      </div>
-    </div>
-    <div class="form-row">
-      <label for="be_sha">SHA256 (optional)</label>
-      <input type="text" id="be_sha" name="sha256" value="{{.BackendSHA256Full}}" placeholder="hex digest of the binary">
-    </div>
-    <div class="form-actions">
-      <button type="submit">Apply</button>
-      <span id="backendStatus" class="status-msg"></span>
-    </div>
-  </form>
-  {{if .BackendVersion}}
-  <div class="grid sync-grid">
-    <div class="card"><div class="label">Synced</div><div class="value green">{{.BackendSynced}}</div></div>
-    <div class="card"><div class="label">Outdated</div><div class="value yellow">{{.BackendOutdated}}</div></div>
-  </div>
-  {{end}}
-</div>
-
-<h2>Role → Model Mappings</h2>
-<div class="form-section">
-  <table id="rolesTable">
-    <thead><tr><th>Role</th><th>Model</th><th>Quant</th><th>Filename</th><th>Min VRAM (MB)</th><th>Description</th><th></th></tr></thead>
-    <tbody>
-    {{range .Roles}}<tr>
-      <td>{{.Role}}</td><td>{{.Model}}</td><td>{{.Quantisation}}</td><td class="mono">{{.Filename}}</td><td>{{.MinVRAMMB}}</td><td>{{.Description}}</td>
-      <td><button class="btn-small btn-delete" onclick="deleteRole('{{.Role}}')">✕</button></td>
-    </tr>{{end}}
-    </tbody>
-  </table>
-  {{if not .Roles}}<p class="empty">No role mappings configured.</p>{{end}}
-
-  <details class="add-role-details">
-    <summary>Add / Update Role</summary>
-    <form id="roleForm" class="admin-form">
-      <div class="form-grid-2col">
-        <div class="form-row"><label for="role_name">Role</label><input type="text" id="role_name" name="role" placeholder="e.g. inference" required></div>
-        <div class="form-row"><label for="role_model">Model</label><input type="text" id="role_model" name="model" placeholder="e.g. mistral-small-3.1" required></div>
-        <div class="form-row"><label for="role_quant">Quantisation</label><input type="text" id="role_quant" name="quantisation" placeholder="e.g. Q4_K_M"></div>
-        <div class="form-row"><label for="role_file">Filename</label><input type="text" id="role_file" name="filename" placeholder="model.gguf"></div>
-        <div class="form-row"><label for="role_vram">Min VRAM (MB)</label><input type="number" id="role_vram" name="min_vram_mb" min="1" required></div>
-        <div class="form-row"><label for="role_desc">Description</label><input type="text" id="role_desc" name="description" placeholder="optional"></div>
-      </div>
-      <div class="form-actions">
-        <button type="submit">Save Role</button>
-        <span id="roleStatus" class="status-msg"></span>
-      </div>
-    </form>
-  </details>
-</div>
-
 <div class="footer">Generated at {{.GeneratedAt}}</div>
 
 <script>
@@ -195,152 +95,6 @@ function closeNav() { document.getElementById("navPanel").classList.remove("open
 document.getElementById("navToggle").addEventListener("click", openNav);
 document.getElementById("navClose").addEventListener("click", closeNav);
 document.getElementById("navOverlay").addEventListener("click", closeNav);
-
-const API_KEY = "{{.APIKey}}";
-const headers = {"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"};
-
-function showStatus(el, msg, ok) {
-  el.textContent = msg;
-  el.className = "status-msg " + (ok ? "ok" : "err");
-  setTimeout(() => { el.textContent = ""; }, 4000);
-}
-
-document.getElementById("versionForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const status = document.getElementById("versionStatus");
-  const body = {
-    target_version: document.getElementById("ver_target").value,
-    rollout_mode: document.getElementById("ver_rollout").value,
-    rollout_percentage: parseInt(document.getElementById("ver_pct").value) || 100,
-    sha256: document.getElementById("ver_sha").value
-  };
-  try {
-    const resp = await fetch("/v1/admin/version", {method: "POST", headers, body: JSON.stringify(body)});
-    if (resp.ok) { showStatus(status, "Saved ✓", true); setTimeout(() => location.reload(), 1000); }
-    else { showStatus(status, "Error: " + resp.status + " " + await resp.text(), false); }
-  } catch(err) { showStatus(status, "Network error: " + err.message, false); }
-});
-
-document.getElementById("backendForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const status = document.getElementById("backendStatus");
-  const body = {
-    name: document.getElementById("be_name").value,
-    version: document.getElementById("be_version").value,
-    sha256: document.getElementById("be_sha").value
-  };
-  if (!body.version) { showStatus(status, "Please select a version", false); return; }
-  try {
-    const resp = await fetch("/v1/admin/backend", {method: "POST", headers, body: JSON.stringify(body)});
-    if (resp.ok) { showStatus(status, "Applied ✓", true); setTimeout(() => location.reload(), 1000); }
-    else { showStatus(status, "Error: " + resp.status + " " + await resp.text(), false); }
-  } catch(err) { showStatus(status, "Network error: " + err.message, false); }
-});
-
-async function refreshBackendTags() {
-  const name = document.getElementById("be_name").value;
-  const btn = document.getElementById("refreshTagsBtn");
-  const sel = document.getElementById("be_version");
-  const currentVal = sel.value;
-  btn.disabled = true;
-  btn.textContent = "…";
-  try {
-    const resp = await fetch("/v1/admin/backend/tags?name=" + encodeURIComponent(name), {method: "GET", headers});
-    if (!resp.ok) { btn.title = "Failed: " + resp.status; return; }
-    const data = await resp.json();
-    sel.innerHTML = "";
-    if (data.tags && data.tags.length > 0) {
-      for (const tag of data.tags) {
-        const opt = document.createElement("option");
-        opt.value = tag;
-        opt.textContent = tag;
-        if (tag === currentVal) opt.selected = true;
-        sel.appendChild(opt);
-      }
-    } else {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "(no tags found)";
-      sel.appendChild(opt);
-    }
-  } catch(err) { btn.title = "Error: " + err.message; }
-  finally { btn.disabled = false; btn.textContent = "↻"; }
-  updateReleaseLink();
-}
-
-const releaseURLs = {
-  "llama.cpp": "https://github.com/ggml-org/llama.cpp/releases/tag/"
-};
-
-function updateReleaseLink() {
-  const name = document.getElementById("be_name").value;
-  const version = document.getElementById("be_version").value;
-  const link = document.getElementById("releaseLink");
-  const base = releaseURLs[name];
-  if (base && version) {
-    link.href = base + encodeURIComponent(version);
-    link.style.display = "";
-  } else {
-    link.removeAttribute("href");
-    link.style.display = "none";
-  }
-}
-
-document.getElementById("refreshTagsBtn").addEventListener("click", refreshBackendTags);
-document.getElementById("be_name").addEventListener("change", refreshBackendTags);
-document.getElementById("be_version").addEventListener("change", updateReleaseLink);
-updateReleaseLink();
-
-// --- Client version tag selector ---
-async function refreshClientTags() {
-  const btn = document.getElementById("refreshClientTagsBtn");
-  const sel = document.getElementById("ver_target");
-  const currentVal = sel.value;
-  btn.disabled = true;
-  btn.textContent = "…";
-  try {
-    const resp = await fetch("/v1/admin/version/tags?limit=20", {method: "GET", headers});
-    if (!resp.ok) { btn.title = "Failed: " + resp.status; return; }
-    const data = await resp.json();
-    sel.innerHTML = "";
-    if (data.tags && data.tags.length > 0) {
-      for (const tag of data.tags) {
-        const opt = document.createElement("option");
-        opt.value = tag;
-        opt.textContent = tag;
-        if (tag === currentVal) opt.selected = true;
-        sel.appendChild(opt);
-      }
-    } else {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "(no tags found)";
-      sel.appendChild(opt);
-    }
-  } catch(err) { btn.title = "Error: " + err.message; }
-  finally { btn.disabled = false; btn.textContent = "↻"; }
-  updateClientReleaseLink();
-}
-
-function updateClientReleaseLink() {
-  const version = document.getElementById("ver_target").value;
-  const link = document.getElementById("clientReleaseLink");
-  if (version) {
-    link.href = "https://github.com/ylallemant/synergia/releases/tag/" + encodeURIComponent(version);
-    link.style.display = "";
-  } else {
-    link.removeAttribute("href");
-    link.style.display = "none";
-  }
-}
-
-document.getElementById("refreshClientTagsBtn").addEventListener("click", refreshClientTags);
-document.getElementById("ver_target").addEventListener("change", updateClientReleaseLink);
-updateClientReleaseLink();
-
-// Auto-fetch tags on page load (cache-backed, no alert popups)
-refreshClientTags();
-refreshBackendTags();
 
 // Poll live stats every 2 seconds without full page reload
 setInterval(async () => {
@@ -354,33 +108,7 @@ setInterval(async () => {
     const footer = doc.querySelector(".footer");
     if (footer) document.querySelector(".footer").innerHTML = footer.innerHTML;
   } catch(e) { console.error("Failed to refresh live stats:", e); }
-}, 1000);
-
-document.getElementById("roleForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const status = document.getElementById("roleStatus");
-  const body = {
-    role: document.getElementById("role_name").value,
-    model: document.getElementById("role_model").value,
-    quantisation: document.getElementById("role_quant").value,
-    filename: document.getElementById("role_file").value,
-    min_vram_mb: parseInt(document.getElementById("role_vram").value) || 0,
-    description: document.getElementById("role_desc").value
-  };
-  try {
-    const resp = await fetch("/v1/admin/roles", {method: "POST", headers, body: JSON.stringify(body)});
-    if (resp.ok) { showStatus(status, "Saved ✓", true); setTimeout(() => location.reload(), 1000); }
-    else { showStatus(status, "Error: " + resp.status + " " + await resp.text(), false); }
-  } catch(err) { showStatus(status, "Network error: " + err.message, false); }
-});
-
-async function deleteRole(role) {
-  if (!confirm("Delete role mapping: " + role + "?")) return;
-  try {
-    await fetch("/v1/admin/roles?role=" + encodeURIComponent(role), {method: "DELETE", headers});
-    location.reload();
-  } catch(err) { alert("Failed: " + err.message); }
-}
+}, 2000);
 </script>
 </body>
 </html>

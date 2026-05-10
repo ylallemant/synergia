@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"runtime"
@@ -118,7 +119,6 @@ func (c *Connection) Run(ctx context.Context) {
 
 func (c *Connection) connect(ctx context.Context) error {
 	headers := http.Header{
-		"Authorization":         []string{"Bearer " + c.workerKey},
 		"X-Worker-Fingerprint":  []string{c.identity.Fingerprint},
 		"X-Worker-Public-Key":   []string{base64.StdEncoding.EncodeToString(c.identity.PublicKey)},
 		"X-Worker-Model":        []string{c.model},
@@ -126,6 +126,13 @@ func (c *Connection) connect(ctx context.Context) error {
 		"X-Worker-Version":      []string{version.Version},
 		"X-Worker-OS":           []string{runtime.GOOS},
 		"X-Worker-Arch":         []string{runtime.GOARCH},
+	}
+	// Key-auth mode: send Bearer token. Empty workerKey = TOFU mode, no header sent.
+	if c.workerKey != "" {
+		headers.Set("Authorization", "Bearer "+c.workerKey)
+		log.Debug().Msg("handshake: using key-auth mode")
+	} else {
+		log.Debug().Msg("handshake: using TOFU mode — awaiting challenge from manager")
 	}
 
 	c.mu.Lock()
@@ -231,6 +238,12 @@ func (c *Connection) readLoop(ctx context.Context) error {
 				Str("download_url", bu.DownloadURL).
 				Msg("received backend update from manager")
 			c.BackendUpdateCh <- &bu
+
+		case protocol.TypeChallenge:
+			// TOFU mode: manager sent a nonce immediately after upgrade — sign and reply
+			if !handleChallenge(c.conn, message, c.identity.PrivateKey) {
+				return fmt.Errorf("TOFU challenge-response failed")
+			}
 
 		case protocol.TypeHeartbeat:
 			// Manager acknowledged our heartbeat, nothing to do

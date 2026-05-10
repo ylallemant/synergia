@@ -248,6 +248,15 @@ func main() {
 
 	// Administration server (separate port)
 
+	// Worker auth config stored via admin UI overrides env vars at startup
+	if wac, err := db.GetWorkerAuthConfig(); err == nil && wac != nil {
+		if wac.TOFUEnabled {
+			cfg.WorkerKey = ""
+		} else if wac.WorkerKey != "" {
+			cfg.WorkerKey = wac.WorkerKey
+		}
+	}
+
 	// OIDC config stored via admin UI overrides env vars at startup
 	if oidcDB, err := db.GetOIDCConfig(); err == nil && oidcDB != nil {
 		cfg.OIDCEnabled = oidcDB.Enabled
@@ -291,6 +300,8 @@ func main() {
 	adminServer.HandleFuncAdmin("/v1/admin/branding/css", adminBrandingAPI.AdminUpdateHandler)
 	adminOIDCAPI := adminapi.NewAdminOIDCAPI(db)
 	adminServer.HandleFuncAdmin("/v1/admin/oidc", adminOIDCAPI.ConfigHandler)
+	adminWorkersAPI := adminapi.NewAdminWorkersAPI(db)
+	adminServer.HandleFuncAdmin("/v1/admin/workers", adminWorkersAPI.ConfigHandler)
 
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

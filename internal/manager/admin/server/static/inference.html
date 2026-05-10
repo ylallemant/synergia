@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inference — Synergia Admin</title>
+<link rel="stylesheet" href="/static/default.css">
+</head>
+<body>
+
+<nav class="top-nav">
+  <a class="nav-brand" href="/">Synergia Admin</a>
+  <button class="nav-burger" id="navToggle" aria-label="Open menu">
+    <span></span><span></span><span></span>
+  </button>
+</nav>
+<div class="nav-overlay" id="navOverlay"></div>
+<aside class="nav-panel" id="navPanel">
+  <button class="nav-close" id="navClose" aria-label="Close menu">&#x2715;</button>
+  <nav class="nav-links">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/admin/workers" class="nav-link">Workers</a>
+    <a href="/admin/inference" class="nav-link active">Inference</a>
+    <a href="/admin/oidc" class="nav-link">OIDC Settings</a>
+    <div class="nav-divider"></div>
+    <a href="/logout" class="nav-link nav-link-danger">Log out</a>
+  </nav>
+</aside>
+
+<h1>Inference</h1>
+
+<!-- ── Backend Version ────────────────────────────────────────────────────── -->
+<h2>Backend Version</h2>
+<div class="form-section">
+  <form id="backendForm" class="admin-form">
+    <div class="form-row">
+      <label for="be_name">Backend</label>
+      <select id="be_name" name="name">
+        <option value="llama.cpp">llama.cpp</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label for="be_version">Version</label>
+      <div class="input-with-btn">
+        <select id="be_version" name="version"></select>
+        <button type="button" id="refreshTagsBtn" class="btn-small" title="Refresh tags from GitHub">↻</button>
+        <a id="releaseLink" class="btn-small" target="_blank" rel="noopener" title="Open release page" style="display:none">↗</a>
+      </div>
+    </div>
+    <div class="form-row">
+      <label for="be_sha">SHA256 (optional)</label>
+      <input type="text" id="be_sha" name="sha256" placeholder="hex digest of the binary">
+    </div>
+    <div class="form-actions">
+      <button type="submit">Apply</button>
+      <span id="backendStatus" class="status-msg"></span>
+    </div>
+  </form>
+  <div id="backendSyncGrid" class="grid sync-grid" style="display:none">
+    <div class="card"><div class="label">Synced</div><div class="value green" id="beSynced">—</div></div>
+    <div class="card"><div class="label">Out of Sync</div><div class="value yellow" id="beOutdated">—</div></div>
+  </div>
+</div>
+
+<!-- ── Role → Model Mappings ──────────────────────────────────────────────── -->
+<h2>Role → Model Mappings</h2>
+<div class="form-section">
+  <table id="rolesTable">
+    <thead><tr><th>Role</th><th>Model</th><th>Quant</th><th>Filename</th><th>Min VRAM (MB)</th><th>Description</th><th></th></tr></thead>
+    <tbody id="rolesBody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+  </table>
+
+  <details class="add-role-details">
+    <summary>Add / Update Role</summary>
+    <form id="roleForm" class="admin-form">
+      <div class="form-grid-2col">
+        <div class="form-row"><label for="role_name">Role</label><input type="text" id="role_name" name="role" placeholder="e.g. inference" required></div>
+        <div class="form-row"><label for="role_model">Model</label><input type="text" id="role_model" name="model" placeholder="e.g. mistral-small-3.1" required></div>
+        <div class="form-row"><label for="role_quant">Quantisation</label><input type="text" id="role_quant" name="quantisation" placeholder="e.g. Q4_K_M"></div>
+        <div class="form-row"><label for="role_file">Filename</label><input type="text" id="role_file" name="filename" placeholder="model.gguf"></div>
+        <div class="form-row"><label for="role_vram">Min VRAM (MB)</label><input type="number" id="role_vram" name="min_vram_mb" min="1" required></div>
+        <div class="form-row"><label for="role_desc">Description</label><input type="text" id="role_desc" name="description" placeholder="optional"></div>
+      </div>
+      <div class="form-actions">
+        <button type="submit">Save Role</button>
+        <span id="roleStatus" class="status-msg"></span>
+      </div>
+    </form>
+  </details>
+</div>
+
+<div class="footer">Synergia Cluster Manager</div>
+
+<script>
+const API_KEY = "{{.APIKey}}";
+const headers = {"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"};
+
+// --- Nav ---
+function openNav()  { document.getElementById("navPanel").classList.add("open");  document.getElementById("navOverlay").classList.add("show"); }
+function closeNav() { document.getElementById("navPanel").classList.remove("open"); document.getElementById("navOverlay").classList.remove("show"); }
+document.getElementById("navToggle").addEventListener("click", openNav);
+document.getElementById("navClose").addEventListener("click", closeNav);
+document.getElementById("navOverlay").addEventListener("click", closeNav);
+
+function showStatus(el, msg, ok) {
+  el.textContent = msg;
+  el.className = "status-msg " + (ok ? "ok" : "err");
+  setTimeout(() => { el.textContent = ""; el.className = "status-msg"; }, 5000);
+}
+
+// ── Backend ────────────────────────────────────────────────────────────────
+async function loadBackendConfig() {
+  try {
+    const resp = await fetch("/v1/admin/backend", {headers});
+    if (!resp.ok) return;
+    const cfg = await resp.json();
+    if (cfg.name) document.getElementById("be_name").value = cfg.name;
+    if (cfg.version) {
+      document.getElementById("be_version").innerHTML =
+        `<option value="${cfg.version}" selected>${cfg.version}</option>`;
+    }
+    if (cfg.sha256) document.getElementById("be_sha").value = cfg.sha256;
+  } catch(e) { console.error("Failed to load backend config:", e); }
+}
+loadBackendConfig();
+
+async function refreshBackendTags() {
+  const name = document.getElementById("be_name").value;
+  const btn = document.getElementById("refreshTagsBtn");
+  const sel = document.getElementById("be_version");
+  const currentVal = sel.value;
+  btn.disabled = true; btn.textContent = "…";
+  try {
+    const resp = await fetch("/v1/admin/backend/tags?name=" + encodeURIComponent(name), {headers});
+    if (!resp.ok) { btn.title = "Failed: " + resp.status; return; }
+    const data = await resp.json();
+    sel.innerHTML = "";
+    if (data.tags && data.tags.length > 0) {
+      for (const tag of data.tags) {
+        const opt = document.createElement("option");
+        opt.value = tag; opt.textContent = tag;
+        if (tag === currentVal) opt.selected = true;
+        sel.appendChild(opt);
+      }
+    } else { sel.innerHTML = '<option value="">(no tags found)</option>'; }
+  } catch(err) { btn.title = "Error: " + err.message; }
+  finally { btn.disabled = false; btn.textContent = "↻"; }
+  updateReleaseLink();
+}
+
+const releaseURLs = { "llama.cpp": "https://github.com/ggml-org/llama.cpp/releases/tag/" };
+
+function updateReleaseLink() {
+  const name = document.getElementById("be_name").value;
+  const version = document.getElementById("be_version").value;
+  const link = document.getElementById("releaseLink");
+  const base = releaseURLs[name];
+  if (base && version) { link.href = base + encodeURIComponent(version); link.style.display = ""; }
+  else { link.removeAttribute("href"); link.style.display = "none"; }
+}
+
+document.getElementById("refreshTagsBtn").addEventListener("click", refreshBackendTags);
+document.getElementById("be_name").addEventListener("change", refreshBackendTags);
+document.getElementById("be_version").addEventListener("change", updateReleaseLink);
+refreshBackendTags();
+
+document.getElementById("backendForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const status = document.getElementById("backendStatus");
+  const body = {
+    name: document.getElementById("be_name").value,
+    version: document.getElementById("be_version").value,
+    sha256: document.getElementById("be_sha").value
+  };
+  if (!body.version) { showStatus(status, "Please select a version", false); return; }
+  try {
+    const resp = await fetch("/v1/admin/backend", {method: "POST", headers, body: JSON.stringify(body)});
+    if (resp.ok) { showStatus(status, "Applied ✓", true); }
+    else { showStatus(status, "Error: " + resp.status + " " + await resp.text(), false); }
+  } catch(err) { showStatus(status, "Network error: " + err.message, false); }
+});
+
+// ── Roles ──────────────────────────────────────────────────────────────────
+async function loadRoles() {
+  try {
+    const resp = await fetch("/v1/admin/roles", {headers});
+    if (!resp.ok) return;
+    const roles = await resp.json();
+    const tbody = document.getElementById("rolesBody");
+    if (!roles || roles.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">No role mappings configured.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = roles.map(r => `<tr>
+      <td>${r.role}</td><td>${r.model || ""}</td><td>${r.quantisation || ""}</td>
+      <td class="mono">${r.filename || ""}</td><td>${r.min_vram_mb}</td>
+      <td>${r.description || ""}</td>
+      <td><button class="btn-small btn-delete" onclick="deleteRole('${r.role}')">&#x2715;</button></td>
+    </tr>`).join("");
+  } catch(e) { console.error("Failed to load roles:", e); }
+}
+loadRoles();
+
+document.getElementById("roleForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const status = document.getElementById("roleStatus");
+  const body = {
+    role: document.getElementById("role_name").value,
+    model: document.getElementById("role_model").value,
+    quantisation: document.getElementById("role_quant").value,
+    filename: document.getElementById("role_file").value,
+    min_vram_mb: parseInt(document.getElementById("role_vram").value) || 0,
+    description: document.getElementById("role_desc").value
+  };
+  try {
+    const resp = await fetch("/v1/admin/roles", {method: "POST", headers, body: JSON.stringify(body)});
+    if (resp.ok) { showStatus(status, "Saved ✓", true); loadRoles(); }
+    else { showStatus(status, "Error: " + resp.status + " " + await resp.text(), false); }
+  } catch(err) { showStatus(status, "Network error: " + err.message, false); }
+});
+
+async function deleteRole(role) {
+  if (!confirm("Delete role mapping: " + role + "?")) return;
+  try {
+    await fetch("/v1/admin/roles?role=" + encodeURIComponent(role), {method: "DELETE", headers});
+    loadRoles();
+  } catch(err) { alert("Failed: " + err.message); }
+}
+</script>
+</body>
+</html>
