@@ -85,6 +85,13 @@ jobs:
           fi
         shell: bash
 
+      # TODO: code-sign and notarize darwin binaries with an Apple Developer ID
+      # certificate so macOS Gatekeeper accepts them without the
+      # "damaged and can't be opened" prompt. Requires:
+      #   - APPLE_DEVELOPER_ID_CERT secret (p12, base64)
+      #   - APPLE_DEVELOPER_ID_CERT_PASSWORD secret
+      #   - APPLE_ID / APPLE_TEAM_ID / APPLE_APP_PASSWORD secrets for notarytool
+      # Steps: import cert → codesign --deep --sign → xcrun notarytool submit
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:

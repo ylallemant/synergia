@@ -42,6 +42,13 @@ echo "Downloading synergia-client for $OS/$ARCH..."
 curl -sSL -o "$INSTALL_DIR/$BINARY" "$BASE_URL/download/$OS/$ARCH"
 chmod +x "$INSTALL_DIR/$BINARY"
 
+# macOS Gatekeeper quarantine: browsers tag downloaded files with
+# com.apple.quarantine, which causes a "damaged and can't be opened" error
+# even after chmod +x. Strip it here so the binary runs without prompts.
+if [ "$OS" = "darwin" ]; then
+  xattr -dr com.apple.quarantine "$INSTALL_DIR/$BINARY" 2>/dev/null || true
+fi
+
 echo "Installed to $INSTALL_DIR/$BINARY"
 
 # Save worker key if provided

@@ -115,7 +115,10 @@ h1{font-size:2rem;margin-bottom:.5rem}
       btn.classList.remove('disabled');
       if (os !== 'windows') {
         const filename = 'synergia-client-' + os + '-' + arch;
-        document.getElementById('chmod-cmd').textContent = 'chmod +x ' + filename;
+        const cmd = os === 'darwin'
+          ? 'xattr -dr com.apple.quarantine ' + filename + ' && chmod +x ' + filename
+          : 'chmod +x ' + filename;
+        document.getElementById('chmod-cmd').textContent = cmd;
         document.getElementById('chmod-note').style.display = '';
       }
     } else {
