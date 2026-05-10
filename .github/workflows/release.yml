@@ -92,10 +92,47 @@ jobs:
       #   - APPLE_DEVELOPER_ID_CERT_PASSWORD secret
       #   - APPLE_ID / APPLE_TEAM_ID / APPLE_APP_PASSWORD secrets for notarytool
       # Steps: import cert → codesign --deep --sign → xcrun notarytool submit
+      # See docs/apple-developer-id.md for the full workflow snippet.
+
+      - name: Create .app bundle and DMG (darwin only)
+        if: matrix.goos == 'darwin'
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          APP="dist/Synergia.app"
+          DMG="dist/synergia-darwin-${{ matrix.goarch }}.dmg"
+
+          mkdir -p "${APP}/Contents/MacOS"
+          cp "dist/${{ matrix.artifact }}" "${APP}/Contents/MacOS/synergia-client"
+          chmod +x "${APP}/Contents/MacOS/synergia-client"
+
+          cat > "${APP}/Contents/Info.plist" << PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>   <string>synergia-client</string>
+            <key>CFBundleIdentifier</key>   <string>net.synergia.client</string>
+            <key>CFBundleName</key>          <string>Synergia</string>
+            <key>CFBundleShortVersionString</key> <string>${VERSION}</string>
+            <key>CFBundlePackageType</key>   <string>APPL</string>
+            <key>LSUIElement</key>           <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          hdiutil create \
+            -volname "Synergia ${VERSION}" \
+            -srcfolder "${APP}" \
+            -ov -format UDZO \
+            "${DMG}"
+        shell: bash
+
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.artifact }}
+          files: |
+            dist/${{ matrix.artifact }}
+            ${{ matrix.goos == 'darwin' && format('dist/synergia-darwin-{0}.dmg', matrix.goarch) || '' }}
 
   # ── synergia-updater (Windows only) ──────────────────────────────
   build-updater:

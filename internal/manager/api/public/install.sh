@@ -26,6 +26,7 @@ esac
 BINARY="synergia-client"
 INSTALL_DIR="$HOME/.local/bin"
 DATA_DIR="$HOME/.local/share/synergia"
+APP_BUNDLE="$HOME/Applications/Synergia.app"
 
 echo "Synergia Client Installer"
 echo "========================="
@@ -42,11 +43,29 @@ echo "Downloading synergia-client for $OS/$ARCH..."
 curl -sSL -o "$INSTALL_DIR/$BINARY" "$BASE_URL/download/$OS/$ARCH"
 chmod +x "$INSTALL_DIR/$BINARY"
 
-# macOS Gatekeeper quarantine: browsers tag downloaded files with
-# com.apple.quarantine, which causes a "damaged and can't be opened" error
-# even after chmod +x. Strip it here so the binary runs without prompts.
+# macOS: clear Gatekeeper quarantine and wrap in a .app bundle so
+# double-clicking opens the tray icon without spawning a terminal window.
 if [ "$OS" = "darwin" ]; then
   xattr -dr com.apple.quarantine "$INSTALL_DIR/$BINARY" 2>/dev/null || true
+
+  mkdir -p "$APP_BUNDLE/Contents/MacOS"
+  cp "$INSTALL_DIR/$BINARY" "$APP_BUNDLE/Contents/MacOS/synergia-client"
+  chmod +x "$APP_BUNDLE/Contents/MacOS/synergia-client"
+  cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>   <string>synergia-client</string>
+  <key>CFBundleIdentifier</key>  <string>net.synergia.client</string>
+  <key>CFBundleName</key>         <string>Synergia</string>
+  <key>CFBundlePackageType</key>  <string>APPL</string>
+  <key>CFBundleVersion</key>      <string>1</string>
+  <key>LSUIElement</key>          <true/>
+</dict>
+</plist>
+PLIST
+  echo "App bundle created at $APP_BUNDLE — double-click to launch (tray only, no terminal)"
 fi
 
 echo "Installed to $INSTALL_DIR/$BINARY"
@@ -62,6 +81,9 @@ if [ "$OS" = "darwin" ]; then
   PLIST_DIR="$HOME/Library/LaunchAgents"
   PLIST_FILE="$PLIST_DIR/com.synergia.client.plist"
   mkdir -p "$PLIST_DIR"
+  # Point the LaunchAgent at the binary inside the .app bundle so it runs
+  # as a proper background app (tray only, no terminal window).
+  LAUNCH_BIN="$APP_BUNDLE/Contents/MacOS/synergia-client"
   cat > "$PLIST_FILE" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -71,7 +93,7 @@ if [ "$OS" = "darwin" ]; then
   <string>com.synergia.client</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$INSTALL_DIR/$BINARY</string>
+    <string>$LAUNCH_BIN</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

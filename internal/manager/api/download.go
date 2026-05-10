@@ -1,6 +1,7 @@
 package api
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"embed"
@@ -132,11 +133,78 @@ func (d *DownloadAPI) BinaryHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ?format=app (darwin only): wrap the patched binary in a .app bundle zip
+	// so the user gets Synergia.app after extraction — no Terminal window on launch.
+	if r.URL.Query().Get("format") == "app" && targetOS == "darwin" {
+		version := d.cache.GetStats().VersionTarget
+		zipData, err := buildAppBundleZip(patched, version)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to build app bundle zip")
+			http.Error(w, "app bundle creation failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="Synergia.zip"`)
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(zipData)))
+		w.Write(zipData)
+		return
+	}
+
 	// Serve the patched binary
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(patched)))
 	w.Write(patched)
+}
+
+// buildAppBundleZip wraps a patched darwin binary in a minimal .app bundle
+// inside a zip archive. macOS auto-extracts zips on download; the result is
+// Synergia.app which launches with LSUIElement=true (tray only, no terminal).
+func buildAppBundleZip(binary []byte, version string) ([]byte, error) {
+	if version == "" {
+		version = "dev"
+	}
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>          <string>synergia-client</string>
+  <key>CFBundleIdentifier</key>          <string>net.synergia.client</string>
+  <key>CFBundleName</key>                <string>Synergia</string>
+  <key>CFBundleShortVersionString</key>  <string>%s</string>
+  <key>CFBundlePackageType</key>         <string>APPL</string>
+  <key>LSUIElement</key>                 <true/>
+</dict>
+</plist>
+`, version)
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	// Binary — must be executable (0755)
+	bh := &zip.FileHeader{Name: "Synergia.app/Contents/MacOS/synergia-client", Method: zip.Deflate}
+	bh.SetMode(0755)
+	bw, err := zw.CreateHeader(bh)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := bw.Write(binary); err != nil {
+		return nil, err
+	}
+
+	// Info.plist
+	pw, err := zw.Create("Synergia.app/Contents/Info.plist")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := pw.Write([]byte(plist)); err != nil {
+		return nil, err
+	}
+
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // InstallHandler serves GET /install — platform-aware install script.
@@ -190,7 +258,7 @@ func patchSentinel(data []byte, managerURL string) ([]byte, error) {
 	copy(result, data)
 	copy(result[idx:idx+sentinelSize], replacement)
 
-	if bytes.Index(result[idx+sentinelSize:], sentinelText) != -1 {
+	if bytes.Contains(result[idx+sentinelSize:], sentinelText) {
 		return nil, fmt.Errorf("multiple sentinels found in binary")
 	}
 
@@ -219,7 +287,7 @@ func recomputeAdHocSignature(data []byte) {
 	ncmds := binary.LittleEndian.Uint32(data[16:])
 	off := uint32(32) // sizeof(mach_header_64)
 	var csOff, csSize uint32
-	for i := uint32(0); i < ncmds; i++ {
+	for range ncmds {
 		cmd := binary.LittleEndian.Uint32(data[off:])
 		cmdsize := binary.LittleEndian.Uint32(data[off+4:])
 		if cmd == 0x1d { // LC_CODE_SIGNATURE
@@ -240,7 +308,7 @@ func recomputeAdHocSignature(data []byte) {
 
 	// Find the CodeDirectory blob (blob type 0)
 	var cdOff uint32
-	for i := uint32(0); i < count; i++ {
+	for i := range count {
 		btype := binary.BigEndian.Uint32(cs[12+i*8:])
 		boff := binary.BigEndian.Uint32(cs[16+i*8:])
 		if btype == 0 {
@@ -269,12 +337,9 @@ func recomputeAdHocSignature(data []byte) {
 		return
 	}
 
-	for i := uint32(0); i < nCode; i++ {
+	for i := range nCode {
 		start := i * pageSize
-		end := start + pageSize
-		if end > codeLimit {
-			end = codeLimit
-		}
+		end := min(start+pageSize, codeLimit)
 		if int(end) > len(data) {
 			break
 		}
