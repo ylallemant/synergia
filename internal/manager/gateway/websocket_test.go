@@ -373,8 +373,13 @@ func TestSetWorkerKey_LiveChange_ReflectedImmediately(t *testing.T) {
 // ── TypeStatus GPU avg consent gating ─────────────────────────────────────────
 
 // connectWorkerWithStore connects a worker to a gateway backed by a real store,
-// waits for it to register, and returns the client websocket and fingerprint.
-func connectWorkerWithStore(t *testing.T, gw *Gateway, srv *httptest.Server) (*websocket.Conn, string) {
+// waits for it to register in memory AND for UpsertWorker to complete in the DB,
+// then returns the client websocket and fingerprint.
+//
+// The extra DB poll is needed because HasWorker() returns true as soon as the
+// in-memory slot is claimed (before UpsertWorker runs), so without it a test
+// that directly writes to the store for that fingerprint would UPDATE 0 rows.
+func connectWorkerWithStore(t *testing.T, gw *Gateway, srv *httptest.Server, s *store.Store) (*websocket.Conn, string) {
 	t.Helper()
 	_, _, fp, pubB64 := generateWorker(t)
 	conn, _, err := dialWorker(t, srv, fp, pubB64, "secret")
@@ -384,6 +389,15 @@ func connectWorkerWithStore(t *testing.T, gw *Gateway, srv *httptest.Server) (*w
 	if !waitForWorker(gw, 2*time.Second) {
 		t.Fatal("worker did not connect")
 	}
+	// Wait for the gateway goroutine's UpsertWorker call to persist the row.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if w, err2 := s.GetWorker(fp); err2 == nil && w != nil {
+			return conn, fp
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("worker %s not persisted to DB within 2s", fp[:8])
 	return conn, fp
 }
 
@@ -406,7 +420,7 @@ func TestTypeStatus_GPUAvg_StoredWhenConsented(t *testing.T) {
 	srv := httptest.NewServer(gw)
 	defer srv.Close()
 
-	conn, fp := connectWorkerWithStore(t, gw, srv)
+	conn, fp := connectWorkerWithStore(t, gw, srv, s)
 	defer conn.Close()
 
 	// Grant consent before the status message arrives.
@@ -438,7 +452,7 @@ func TestTypeStatus_GPUAvg_NotStoredWithoutConsent(t *testing.T) {
 	srv := httptest.NewServer(gw)
 	defer srv.Close()
 
-	conn, fp := connectWorkerWithStore(t, gw, srv)
+	conn, fp := connectWorkerWithStore(t, gw, srv, s)
 	defer conn.Close()
 
 	// No consent — GPUAvg must not be written.
@@ -467,7 +481,7 @@ func TestTypeStatus_GPUAvg_ZeroNotStored(t *testing.T) {
 	srv := httptest.NewServer(gw)
 	defer srv.Close()
 
-	conn, fp := connectWorkerWithStore(t, gw, srv)
+	conn, fp := connectWorkerWithStore(t, gw, srv, s)
 	defer conn.Close()
 
 	// Consent given; set a known value first, then send GPUAvg=0.
