@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/ylallemant/synergia/internal/client/autostart"
 	"github.com/ylallemant/synergia/internal/client/branding"
@@ -41,30 +44,32 @@ type StatusProvider interface {
 
 // Server provides a local HTTP API and dashboard on localhost.
 type Server struct {
-	addr      string
-	status    StatusProvider
-	consent   *consent.Manager
-	config    *workerconfig.Manager
-	branding  *branding.Manager
-	autostart *autostart.Manager
-	logBuf    *logbuffer.Buffer
-	hwInfo    hwinfo.Info
-	server    *http.Server
+	addr        string
+	status      StatusProvider
+	consent     *consent.Manager
+	config      *workerconfig.Manager
+	branding    *branding.Manager
+	autostart   *autostart.Manager
+	logBuf      *logbuffer.Buffer
+	logFilePath string // path to the per-run log file; empty if unavailable
+	hwInfo      hwinfo.Info
+	server      *http.Server
 
 	// onManagerURLSet is called when the user configures a manager URL in setup mode.
 	onManagerURLSet func(url string)
 }
 
-func New(addr string, status StatusProvider, consentMgr *consent.Manager, configMgr *workerconfig.Manager, brandingMgr *branding.Manager, autostartMgr *autostart.Manager, buf *logbuffer.Buffer) *Server {
+func New(addr string, status StatusProvider, consentMgr *consent.Manager, configMgr *workerconfig.Manager, brandingMgr *branding.Manager, autostartMgr *autostart.Manager, buf *logbuffer.Buffer, logFilePath string) *Server {
 	return &Server{
-		addr:      addr,
-		status:    status,
-		consent:   consentMgr,
-		config:    configMgr,
-		branding:  brandingMgr,
-		autostart: autostartMgr,
-		logBuf:    buf,
-		hwInfo:    hwinfo.Collect(),
+		addr:        addr,
+		status:      status,
+		consent:     consentMgr,
+		config:      configMgr,
+		branding:    brandingMgr,
+		autostart:   autostartMgr,
+		logBuf:      buf,
+		logFilePath: logFilePath,
+		hwInfo:      hwinfo.Collect(),
 	}
 }
 
@@ -87,6 +92,8 @@ func (s *Server) Run(ctx context.Context) {
 	mux.HandleFunc("/api/hardware-info", s.handleHardwareInfo)
 	mux.HandleFunc("/api/manager-url", s.handleManagerURL)
 	mux.HandleFunc("/api/logs", s.handleLogs)
+	mux.HandleFunc("/api/logs-file", s.handleLogsFile)
+	mux.HandleFunc("/api/log-level", s.handleLogLevel)
 
 	// Dynamic branding CSS (served from manager cache)
 	mux.HandleFunc("/static/branding.css", s.handleBrandingCSS)
@@ -450,6 +457,55 @@ func (s *Server) handleManagerURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleLogsFile serves the full per-run log file as newline-delimited JSON so
+// the dashboard can load history beyond the 500-entry ring buffer.
+func (s *Server) handleLogsFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.logFilePath == "" {
+		http.Error(w, "log file not available", http.StatusNotFound)
+		return
+	}
+	data, err := os.ReadFile(s.logFilePath)
+	if err != nil {
+		http.Error(w, "failed to read log file", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write(data)
+}
+
+// handleLogLevel gets or sets the zerolog global log level at runtime.
+// GET  → {"level":"info"}
+// POST → {"level":"debug"}  sets the level immediately, no restart needed.
+func (s *Server) handleLogLevel(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case http.MethodGet:
+		json.NewEncoder(w).Encode(map[string]string{"level": zerolog.GlobalLevel().String()})
+	case http.MethodPost:
+		var req struct {
+			Level string `json:"level"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		lvl, err := zerolog.ParseLevel(strings.ToLower(req.Level))
+		if err != nil {
+			http.Error(w, "unknown level: "+req.Level, http.StatusBadRequest)
+			return
+		}
+		zerolog.SetGlobalLevel(lvl)
+		log.Info().Str("level", lvl.String()).Msg("log level changed")
+		json.NewEncoder(w).Encode(map[string]string{"level": lvl.String()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // handleLogs streams log entries to the client via Server-Sent Events.

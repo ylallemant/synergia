@@ -7,31 +7,34 @@
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:"SF Mono","Fira Code",Consolas,monospace;font-size:12px;background:#0f172a;color:#e2e8f0;display:flex;flex-direction:column;height:100vh;overflow:hidden}
-.toolbar{display:flex;align-items:center;gap:0.75rem;padding:0.6rem 1rem;background:#1e293b;border-bottom:1px solid #334155;flex-shrink:0}
-.toolbar select,.toolbar input{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:0.25rem 0.5rem;font-size:12px}
+.toolbar{display:flex;align-items:center;gap:0.75rem;padding:0.6rem 1rem;background:#1e293b;border-bottom:1px solid #334155;flex-shrink:0;flex-wrap:wrap}
+.toolbar select,.toolbar input[type=text]{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:0.25rem 0.5rem;font-size:12px;font-family:inherit}
 .toolbar label{color:#94a3b8;font-size:11px;display:flex;align-items:center;gap:0.4rem}
+#search{flex:1;min-width:10rem;color:#e2e8f0}
+#search.invalid{border-color:#ef4444;color:#fca5a5}
 .btn{background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:0.25rem 0.75rem;font-size:11px;cursor:pointer}
 .btn:hover{background:#475569}
 .status{margin-left:auto;font-size:11px;color:#64748b}
 .status.ok{color:#22c55e}
 .status.err{color:#ef4444}
 #log-container{flex:1;overflow-y:auto;padding:0.5rem 1rem}
-.entry{display:flex;gap:1rem;padding:1px 0;line-height:1.5;white-space:pre-wrap;word-break:break-all}
+.entry{display:flex;gap:1rem;padding:1px 0;line-height:1.5}
 .entry:hover{background:#1e293b}
-.ts{color:#475569;flex-shrink:0;width:8rem}
-.lvl{flex-shrink:0;width:5rem;font-weight:700}
+.ts{color:#475569;flex-shrink:0;white-space:nowrap;width:10rem}
+.lvl{flex-shrink:0;white-space:nowrap;width:3.5rem;font-weight:700}
 .lvl.trace,.lvl.debug{color:#64748b}
 .lvl.info{color:#38bdf8}
 .lvl.warn{color:#fbbf24}
 .lvl.error,.lvl.fatal,.lvl.panic{color:#f87171}
-.msg{flex:1}
+.msg{flex:1;min-width:0;white-space:pre-wrap;word-break:break-all}
 .fields{color:#94a3b8}
+.match{background:#ca8a0440;border-radius:2px}
 </style>
 </head>
 <body>
 
 <div class="toolbar">
-  <label>Level:
+  <label>Display:
     <select id="filter">
       <option value="">all</option>
       <option value="debug">debug+</option>
@@ -40,7 +43,18 @@ body{font-family:"SF Mono","Fira Code",Consolas,monospace;font-size:12px;backgro
       <option value="error">error+</option>
     </select>
   </label>
+  <label>Runtime level:
+    <select id="runtime-level" onchange="setRuntimeLevel(this.value)">
+      <option value="trace">trace</option>
+      <option value="debug">debug</option>
+      <option value="info" selected>info</option>
+      <option value="warn">warn</option>
+      <option value="error">error</option>
+    </select>
+  </label>
+  <input type="text" id="search" placeholder="search / regexp…" autocomplete="off" spellcheck="false">
   <label><input type="checkbox" id="autoscroll" checked> Auto-scroll</label>
+  <button class="btn" onclick="refreshFromFile()" title="Reload full log file and re-apply filters">Refresh</button>
   <button class="btn" onclick="clearLog()">Clear</button>
   <span class="status" id="status">connecting…</span>
 </div>
@@ -48,28 +62,48 @@ body{font-family:"SF Mono","Fira Code",Consolas,monospace;font-size:12px;backgro
 
 <script>
 const LEVELS = {trace:0,debug:1,info:2,warn:3,error:4,fatal:5,panic:6};
-const container = document.getElementById('log-container');
-const statusEl  = document.getElementById('status');
-const filterEl  = document.getElementById('filter');
-const scrollEl  = document.getElementById('autoscroll');
+const container  = document.getElementById('log-container');
+const statusEl   = document.getElementById('status');
+const filterEl   = document.getElementById('filter');
+const scrollEl   = document.getElementById('autoscroll');
+const searchEl   = document.getElementById('search');
 
-let entries = [];
+let entries  = [];
+let searchRe = null; // null = no filter
 
 function clearLog() { entries = []; container.innerHTML = ''; }
 
 function minLevel() { return LEVELS[filterEl.value] ?? -1; }
 
+// Parse the search field. A bare string is used as a regexp pattern directly
+// (plain words work as-is). Returns null if the field is empty or invalid.
+function parseSearch(val) {
+  if (!val) return null;
+  try {
+    return new RegExp(val, 'i');
+  } catch {
+    return null; // invalid regexp — treated as "no filter"
+  }
+}
+
 function renderEntry(raw) {
   let obj;
   try { obj = JSON.parse(raw); } catch { return null; }
+
+  // Level filter
   const lvlStr = (obj.level || 'info').toLowerCase();
   const lvlNum = LEVELS[lvlStr] ?? 2;
   if (lvlNum < minLevel()) return null;
-  const ts  = (obj.time || '').replace('T',' ').replace(/\..+$/,'').replace('+02:00','').replace('Z','');
+
+  // Search filter — tested against the full raw JSON so all fields are searchable
+  if (searchRe && !searchRe.test(raw)) return null;
+
+  const ts  = (obj.time || '').replace('T',' ').replace(/\..+$/,'').replace(/[+-]\d{2}:\d{2}$/,'').replace('Z','');
   const msg = obj.message || obj.msg || '';
   const fields = Object.entries(obj)
     .filter(([k]) => !['level','time','message','msg','caller'].includes(k))
     .map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(' ');
+
   const el = document.createElement('div');
   el.className = 'entry';
   el.innerHTML =
@@ -83,6 +117,15 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function rerender() {
+  container.innerHTML = '';
+  for (const raw of entries) {
+    const el = renderEntry(raw);
+    if (el) container.appendChild(el);
+  }
+  if (scrollEl.checked) container.scrollTop = container.scrollHeight;
+}
+
 function append(raw) {
   entries.push(raw);
   const el = renderEntry(raw);
@@ -91,16 +134,56 @@ function append(raw) {
   if (scrollEl.checked) container.scrollTop = container.scrollHeight;
 }
 
-filterEl.addEventListener('change', () => {
-  container.innerHTML = '';
-  const min = minLevel();
-  entries.forEach(raw => {
-    let obj; try { obj = JSON.parse(raw); } catch { return; }
-    const lvl = LEVELS[(obj.level||'info').toLowerCase()] ?? 2;
-    if (lvl >= min) { const el = renderEntry(raw); if (el) container.appendChild(el); }
-  });
-  if (scrollEl.checked) container.scrollTop = container.scrollHeight;
+filterEl.addEventListener('change', rerender);
+
+// Load full history from the log file, replace the ring-buffer snapshot,
+// then re-apply current filters. Useful when the process has been running
+// longer than the 500-entry ring buffer window.
+async function refreshFromFile() {
+  try {
+    const resp = await fetch('/api/logs-file');
+    if (!resp.ok) return; // file not available — silently ignore
+    const text = await resp.text();
+    entries = text.split('\n').filter(l => l.trim());
+    rerender();
+  } catch { /* network error — ignore */ }
+}
+
+// Debounce search input so rerenders don't fire on every keystroke.
+let searchTimer;
+searchEl.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    const val = searchEl.value.trim();
+    if (!val) {
+      searchRe = null;
+      searchEl.classList.remove('invalid');
+    } else {
+      try {
+        searchRe = new RegExp(val, 'i');
+        searchEl.classList.remove('invalid');
+      } catch {
+        searchRe = null;
+        searchEl.classList.add('invalid'); // red border = invalid regexp, no filter applied
+      }
+    }
+    rerender();
+  }, 150);
 });
+
+// Load current runtime level and pre-select the dropdown.
+fetch('/api/log-level')
+  .then(r => r.json())
+  .then(d => { if (d.level) document.getElementById('runtime-level').value = d.level; })
+  .catch(() => {});
+
+function setRuntimeLevel(level) {
+  fetch('/api/log-level', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({level})
+  }).catch(() => {});
+}
 
 const es = new EventSource('/api/logs');
 es.onopen    = () => { statusEl.textContent = 'connected'; statusEl.className = 'status ok'; };

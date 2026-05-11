@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -42,14 +43,17 @@ import (
 
 const dashboardAddr = "127.0.0.1:9876"
 
-func initLogger(buf *logbuffer.Buffer) {
+// initLogger sets up zerolog. extra writers (e.g. a log file) are added after
+// the console and ring buffer. Call it twice: once before config.Load(), and
+// again after config.Load() when the log file is available.
+func initLogger(buf *logbuffer.Buffer, extra ...io.Writer) {
 	noColor := true
 	if fi, err := os.Stdout.Stat(); err == nil {
 		noColor = (fi.Mode() & os.ModeCharDevice) == 0
 	}
 
 	output := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339, NoColor: noColor}
-	output.FormatLevel = func(i interface{}) string {
+	output.FormatLevel = func(i any) string {
 		return strings.ToUpper(fmt.Sprintf("| %-6s|", i))
 	}
 	zerolog.CallerMarshalFunc = func(pc uintptr, file string, line int) string {
@@ -64,9 +68,40 @@ func initLogger(buf *logbuffer.Buffer) {
 	}
 	zerolog.SetGlobalLevel(level)
 
-	// Write to console AND to the in-memory ring buffer (for /api/logs SSE).
-	multi := zerolog.MultiLevelWriter(output, buf)
-	log.Logger = zerolog.New(multi).With().Timestamp().Caller().Logger()
+	writers := []io.Writer{output, buf}
+	writers = append(writers, extra...)
+	log.Logger = zerolog.New(zerolog.MultiLevelWriter(writers...)).With().Timestamp().Caller().Logger()
+}
+
+// openLogFile creates (or truncates) the per-run log file. Returns the open
+// file so the caller can close it on exit, and the file path for the dashboard.
+func openLogFile(dataDir string) (*os.File, string) {
+	path := filepath.Join(dataDir, "client.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		log.Warn().Err(err).Str("path", path).Msg("failed to open log file — file logging disabled")
+		return nil, ""
+	}
+	return f, path
+}
+
+// scheduledRestart exits at 3 AM when the worker is idle so the LaunchAgent /
+// systemd KeepAlive restarts the process. On restart the log file is truncated,
+// keeping size bounded without losing start-up context.
+func scheduledRestart(ctx context.Context, sp interface{ IsProcessing() bool }) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			if now.Hour() == 3 && now.Minute() == 0 && !sp.IsProcessing() {
+				log.Info().Msg("scheduled nightly restart — log file will be reset")
+				os.Exit(0) // LaunchAgent / systemd restarts the process
+			}
+		}
+	}
 }
 
 func main() {
@@ -94,9 +129,17 @@ func main() {
 		log.Fatal().Err(err).Msg("configuration error")
 	}
 
+	// Open per-run log file (truncated on each start) and add it to zerolog.
+	logFile, logFilePath := openLogFile(cfg.DataDir)
+	if logFile != nil {
+		defer logFile.Close()
+		initLogger(logBuf, logFile)
+		log.Info().Str("path", logFilePath).Msg("log file opened")
+	}
+
 	// Unconfigured mode: no manager URL — start dashboard and wait for user input
 	if cfg.Unconfigured {
-		runUnconfigured(cfg, logBuf)
+		runUnconfigured(cfg, logBuf, logFilePath)
 		return
 	}
 
@@ -185,7 +228,7 @@ func main() {
 		return nil
 	})
 
-	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf)
+	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath)
 	adminURL := localAdminURL(cfg.ManagerURL, cfg.WorkerKey)
 	t := tray.New(sp, "http://"+dashboardAddr+"/static/index.html", adminURL)
 
@@ -240,6 +283,9 @@ func main() {
 
 	// Start work processing loop in background
 	go w.Run(ctx)
+
+	// Nightly restart at 3 AM when idle — keeps log file size bounded
+	go scheduledRestart(ctx, sp)
 
 	// Periodically update the system tray icon with current state
 	go func() {
@@ -296,7 +342,7 @@ func main() {
 // It starts only the local dashboard, opens the browser, and waits for the user
 // to submit a manager URL via the dashboard form. Once configured, it exits so
 // the process can restart with the new configuration (via autostart or manually).
-func runUnconfigured(cfg *config.Config, logBuf *logbuffer.Buffer) {
+func runUnconfigured(cfg *config.Config, logBuf *logbuffer.Buffer, logFilePath string) {
 	log.Warn().Msg("no manager URL configured — starting in setup mode")
 	log.Info().Str("dashboard", "http://"+dashboardAddr+"/static/index.html").Msg("open the dashboard to configure the manager URL")
 
@@ -316,7 +362,7 @@ func runUnconfigured(cfg *config.Config, logBuf *logbuffer.Buffer) {
 	brandingMgr := branding.New(cfg.DataDir, "", "")
 	autostartMgr := autostart.New(execPath(), os.Args[1:])
 
-	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf)
+	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath)
 
 	// When user submits a URL, save it to a config file and exit for restart
 	srv.SetManagerURLCallback(func(managerURL string) {
@@ -439,7 +485,7 @@ func syncWithManager(ctx context.Context, conn *connection.Connection, consentMg
 	}
 
 	// First 3 attempts: every 5 seconds
-	for attempt := 0; attempt < 3; attempt++ {
+	for range 3 {
 		if syncFn() {
 			brandingMgr.StartPeriodicRefresh()
 			return
