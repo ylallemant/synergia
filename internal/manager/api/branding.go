@@ -11,17 +11,17 @@ import (
 // BrandingAPI serves customizable CSS to worker dashboards.
 // CSS is cached in memory and only read from DB on startup or admin update.
 type BrandingAPI struct {
-	workerKey string
-	store     *store.Store
+	workerKeyFn func() string // returns "" in TOFU mode
+	store       *store.Store
 
 	mu  sync.RWMutex
 	css string
 }
 
-func NewBrandingAPI(workerKey string, s *store.Store) *BrandingAPI {
+func NewBrandingAPI(workerKeyFn func() string, s *store.Store) *BrandingAPI {
 	b := &BrandingAPI{
-		workerKey: workerKey,
-		store:     s,
+		workerKeyFn: workerKeyFn,
+		store:       s,
 	}
 	css, err := s.GetBrandingCSS()
 	if err != nil {
@@ -57,7 +57,7 @@ func (b *BrandingAPI) StyleHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if auth := r.Header.Get("Authorization"); auth != "Bearer "+b.workerKey {
+	if key := b.workerKeyFn(); key != "" && r.Header.Get("Authorization") != "Bearer "+key {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

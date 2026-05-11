@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synergia — Logs</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"SF Mono","Fira Code",Consolas,monospace;font-size:12px;background:#0f172a;color:#e2e8f0;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+.toolbar{display:flex;align-items:center;gap:0.75rem;padding:0.6rem 1rem;background:#1e293b;border-bottom:1px solid #334155;flex-shrink:0}
+.toolbar select,.toolbar input{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:0.25rem 0.5rem;font-size:12px}
+.toolbar label{color:#94a3b8;font-size:11px;display:flex;align-items:center;gap:0.4rem}
+.btn{background:#334155;color:#e2e8f0;border:none;border-radius:4px;padding:0.25rem 0.75rem;font-size:11px;cursor:pointer}
+.btn:hover{background:#475569}
+.status{margin-left:auto;font-size:11px;color:#64748b}
+.status.ok{color:#22c55e}
+.status.err{color:#ef4444}
+#log-container{flex:1;overflow-y:auto;padding:0.5rem 1rem}
+.entry{display:flex;gap:1rem;padding:1px 0;line-height:1.5;white-space:pre-wrap;word-break:break-all}
+.entry:hover{background:#1e293b}
+.ts{color:#475569;flex-shrink:0;width:8rem}
+.lvl{flex-shrink:0;width:5rem;font-weight:700}
+.lvl.trace,.lvl.debug{color:#64748b}
+.lvl.info{color:#38bdf8}
+.lvl.warn{color:#fbbf24}
+.lvl.error,.lvl.fatal,.lvl.panic{color:#f87171}
+.msg{flex:1}
+.fields{color:#94a3b8}
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <label>Level:
+    <select id="filter">
+      <option value="">all</option>
+      <option value="debug">debug+</option>
+      <option value="info">info+</option>
+      <option value="warn">warn+</option>
+      <option value="error">error+</option>
+    </select>
+  </label>
+  <label><input type="checkbox" id="autoscroll" checked> Auto-scroll</label>
+  <button class="btn" onclick="clearLog()">Clear</button>
+  <span class="status" id="status">connecting…</span>
+</div>
+<div id="log-container"></div>
+
+<script>
+const LEVELS = {trace:0,debug:1,info:2,warn:3,error:4,fatal:5,panic:6};
+const container = document.getElementById('log-container');
+const statusEl  = document.getElementById('status');
+const filterEl  = document.getElementById('filter');
+const scrollEl  = document.getElementById('autoscroll');
+
+let entries = [];
+
+function clearLog() { entries = []; container.innerHTML = ''; }
+
+function minLevel() { return LEVELS[filterEl.value] ?? -1; }
+
+function renderEntry(raw) {
+  let obj;
+  try { obj = JSON.parse(raw); } catch { return null; }
+  const lvlStr = (obj.level || 'info').toLowerCase();
+  const lvlNum = LEVELS[lvlStr] ?? 2;
+  if (lvlNum < minLevel()) return null;
+  const ts  = (obj.time || '').replace('T',' ').replace(/\..+$/,'').replace('+02:00','').replace('Z','');
+  const msg = obj.message || obj.msg || '';
+  const fields = Object.entries(obj)
+    .filter(([k]) => !['level','time','message','msg','caller'].includes(k))
+    .map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(' ');
+  const el = document.createElement('div');
+  el.className = 'entry';
+  el.innerHTML =
+    `<span class="ts">${ts}</span>` +
+    `<span class="lvl ${lvlStr}">${lvlStr.toUpperCase().padEnd(5)}</span>` +
+    `<span class="msg">${escHtml(msg)}${fields ? ' <span class="fields">'+escHtml(fields)+'</span>' : ''}</span>`;
+  return el;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function append(raw) {
+  entries.push(raw);
+  const el = renderEntry(raw);
+  if (!el) return;
+  container.appendChild(el);
+  if (scrollEl.checked) container.scrollTop = container.scrollHeight;
+}
+
+filterEl.addEventListener('change', () => {
+  container.innerHTML = '';
+  const min = minLevel();
+  entries.forEach(raw => {
+    let obj; try { obj = JSON.parse(raw); } catch { return; }
+    const lvl = LEVELS[(obj.level||'info').toLowerCase()] ?? 2;
+    if (lvl >= min) { const el = renderEntry(raw); if (el) container.appendChild(el); }
+  });
+  if (scrollEl.checked) container.scrollTop = container.scrollHeight;
+});
+
+const es = new EventSource('/api/logs');
+es.onopen    = () => { statusEl.textContent = 'connected'; statusEl.className = 'status ok'; };
+es.onerror   = () => { statusEl.textContent = 'disconnected — retrying…'; statusEl.className = 'status err'; };
+es.onmessage = e => append(e.data);
+</script>
+</body>
+</html>

@@ -72,6 +72,15 @@ func (g *Gateway) SetWorkerKey(key string) {
 	g.mu.Unlock()
 }
 
+// WorkerKey returns the current worker key. Returns "" in TOFU mode.
+// Worker-facing HTTP APIs call this at request time so they always reflect
+// the live auth mode rather than the value captured at startup.
+func (g *Gateway) WorkerKey() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.workerKey
+}
+
 // ServeHTTP handles the WebSocket upgrade for /ws/worker.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Auth mode:
@@ -167,9 +176,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	g.mu.Lock()
 	if g.worker != nil {
-		// Phase 1: only one worker at a time
-		g.worker.conn.Close()
-		log.Warn().Str("old_fingerprint", g.worker.info.Fingerprint).Msg("replaced existing worker")
+		// Phase 1: single worker slot — reject the new connection so the two
+		// workers don't ping-pong each other off the slot. The rejected worker
+		// will back off and retry; when the current worker disconnects it can
+		// take the slot.
+		g.mu.Unlock()
+		log.Warn().Str("fingerprint", fingerprint).Msg("worker slot occupied — rejecting new connection")
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "slot occupied"))
+		conn.Close()
+		return
 	}
 	g.worker = wc
 	g.mu.Unlock()

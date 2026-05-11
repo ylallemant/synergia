@@ -11,14 +11,14 @@ import (
 
 // ModelsDownloadAPI handles model listing and download for workers.
 type ModelsDownloadAPI struct {
-	workerKey  string
-	modelStore models.Store
+	workerKeyFn func() string
+	modelStore  models.Store
 }
 
-func NewModelsDownloadAPI(workerKey string, store models.Store) *ModelsDownloadAPI {
+func NewModelsDownloadAPI(workerKeyFn func() string, store models.Store) *ModelsDownloadAPI {
 	return &ModelsDownloadAPI{
-		workerKey:  workerKey,
-		modelStore: store,
+		workerKeyFn: workerKeyFn,
+		modelStore:  store,
 	}
 }
 
@@ -80,13 +80,16 @@ func (m *ModelsDownloadAPI) DownloadHandler(w http.ResponseWriter, r *http.Reque
 }
 
 func (m *ModelsDownloadAPI) authenticate(r *http.Request) bool {
-	// Accept both worker key and API key for model downloads
-	if apiKey := r.Header.Get("X-API-Key"); apiKey == m.workerKey {
+	key := m.workerKeyFn()
+	if key == "" {
+		return true // TOFU mode — no key required
+	}
+	if apiKey := r.Header.Get("X-API-Key"); apiKey == key {
 		return true
 	}
 	auth := r.Header.Get("Authorization")
 	if len(auth) > 7 && auth[:7] == "Bearer " {
-		return auth[7:] == m.workerKey
+		return auth[7:] == key
 	}
 	return false
 }

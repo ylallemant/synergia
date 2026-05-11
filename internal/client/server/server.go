@@ -15,6 +15,7 @@ import (
 	"github.com/ylallemant/synergia/internal/client/consent"
 	"github.com/ylallemant/synergia/internal/client/gpu"
 	"github.com/ylallemant/synergia/internal/client/hwinfo"
+	"github.com/ylallemant/synergia/internal/client/logbuffer"
 	"github.com/ylallemant/synergia/internal/client/workerconfig"
 )
 
@@ -46,6 +47,7 @@ type Server struct {
 	config    *workerconfig.Manager
 	branding  *branding.Manager
 	autostart *autostart.Manager
+	logBuf    *logbuffer.Buffer
 	hwInfo    hwinfo.Info
 	server    *http.Server
 
@@ -53,7 +55,7 @@ type Server struct {
 	onManagerURLSet func(url string)
 }
 
-func New(addr string, status StatusProvider, consentMgr *consent.Manager, configMgr *workerconfig.Manager, brandingMgr *branding.Manager, autostartMgr *autostart.Manager) *Server {
+func New(addr string, status StatusProvider, consentMgr *consent.Manager, configMgr *workerconfig.Manager, brandingMgr *branding.Manager, autostartMgr *autostart.Manager, buf *logbuffer.Buffer) *Server {
 	return &Server{
 		addr:      addr,
 		status:    status,
@@ -61,6 +63,7 @@ func New(addr string, status StatusProvider, consentMgr *consent.Manager, config
 		config:    configMgr,
 		branding:  brandingMgr,
 		autostart: autostartMgr,
+		logBuf:    buf,
 		hwInfo:    hwinfo.Collect(),
 	}
 }
@@ -83,6 +86,7 @@ func (s *Server) Run(ctx context.Context) {
 	mux.HandleFunc("/api/autostart", s.handleAutostart)
 	mux.HandleFunc("/api/hardware-info", s.handleHardwareInfo)
 	mux.HandleFunc("/api/manager-url", s.handleManagerURL)
+	mux.HandleFunc("/api/logs", s.handleLogs)
 
 	// Dynamic branding CSS (served from manager cache)
 	mux.HandleFunc("/static/branding.css", s.handleBrandingCSS)
@@ -446,4 +450,40 @@ func (s *Server) handleManagerURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleLogs streams log entries to the client via Server-Sent Events.
+// On connect it replays the ring buffer, then pushes new lines in real time.
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Replay history
+	for _, entry := range s.logBuf.GetAll() {
+		fmt.Fprintf(w, "data: %s\n\n", entry)
+	}
+	flusher.Flush()
+
+	// Stream new entries
+	id, ch := s.logBuf.Subscribe()
+	defer s.logBuf.Unsubscribe(id)
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case line, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", line)
+			flusher.Flush()
+		}
+	}
 }

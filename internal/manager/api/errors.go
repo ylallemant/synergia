@@ -12,14 +12,14 @@ import (
 
 // ErrorsAPI handles client error reporting endpoints.
 type ErrorsAPI struct {
-	workerKey string
+	workerKeyFn func() string
 	store     *store.Store
 }
 
-func NewErrorsAPI(workerKey string, s *store.Store) *ErrorsAPI {
+func NewErrorsAPI(workerKeyFn func() string, s *store.Store) *ErrorsAPI {
 	return &ErrorsAPI{
-		workerKey: workerKey,
-		store:     s,
+		workerKeyFn: workerKeyFn,
+		store:       s,
 	}
 }
 
@@ -47,7 +47,7 @@ func (a *ErrorsAPI) ErrorsHandler(w http.ResponseWriter, r *http.Request) {
 func (a *ErrorsAPI) handleGet(w http.ResponseWriter, r *http.Request) {
 	// Authenticate with worker key or API key
 	authHeader := r.Header.Get("Authorization")
-	if authHeader != "Bearer "+a.workerKey {
+	if key := a.workerKeyFn(); key != "" && authHeader != "Bearer "+key {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -90,7 +90,7 @@ func (a *ErrorsAPI) handleGet(w http.ResponseWriter, r *http.Request) {
 func (a *ErrorsAPI) handlePost(w http.ResponseWriter, r *http.Request) {
 	// Authenticate
 	authHeader := r.Header.Get("Authorization")
-	if authHeader != "Bearer "+a.workerKey {
+	if key := a.workerKeyFn(); key != "" && authHeader != "Bearer "+key {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

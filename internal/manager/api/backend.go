@@ -16,24 +16,24 @@ import (
 
 // BackendAPI serves the cached backend binary to workers.
 type BackendAPI struct {
-	workerKey string
-	store     *store.Store
-	cacheDir  string
+	workerKeyFn func() string
+	store       *store.Store
+	cacheDir    string
 
 	mu       sync.RWMutex
 	cacheMap map[string]string // version-os-arch → cached file path
 }
 
-func NewBackendAPI(workerKey string, s *store.Store, cacheDir string) *BackendAPI {
+func NewBackendAPI(workerKeyFn func() string, s *store.Store, cacheDir string) *BackendAPI {
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		log.Warn().Err(err).Str("dir", cacheDir).Msg("failed to create backend cache dir")
 	}
 
 	b := &BackendAPI{
-		workerKey: workerKey,
-		store:     s,
-		cacheDir:  cacheDir,
-		cacheMap:  make(map[string]string),
+		workerKeyFn: workerKeyFn,
+		store:       s,
+		cacheDir:    cacheDir,
+		cacheMap:    make(map[string]string),
 	}
 
 	entries, _ := os.ReadDir(cacheDir)
@@ -54,7 +54,7 @@ func (b *BackendAPI) BackendDownloadHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if auth := r.Header.Get("Authorization"); auth != "Bearer "+b.workerKey {
+	if key := b.workerKeyFn(); key != "" && r.Header.Get("Authorization") != "Bearer "+key {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

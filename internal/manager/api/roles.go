@@ -10,18 +10,18 @@ import (
 
 // RolesAPI handles role-model mapping queries for workers.
 type RolesAPI struct {
-	workerKey string
-	apiKey    string
-	store     *store.Store
-	testSetup bool
+	workerKeyFn func() string
+	apiKey      string
+	store       *store.Store
+	testSetup   bool
 }
 
-func NewRolesAPI(apiKey, workerKey string, s *store.Store, testSetup bool) *RolesAPI {
+func NewRolesAPI(apiKey string, workerKeyFn func() string, s *store.Store, testSetup bool) *RolesAPI {
 	return &RolesAPI{
-		apiKey:    apiKey,
-		workerKey: workerKey,
-		store:     s,
-		testSetup: testSetup,
+		apiKey:      apiKey,
+		workerKeyFn: workerKeyFn,
+		store:       s,
+		testSetup:   testSetup,
 	}
 }
 
@@ -90,8 +90,8 @@ func (r *RolesAPI) RolesHandler(w http.ResponseWriter, req *http.Request) {
 
 func (r *RolesAPI) authenticate(req *http.Request) bool {
 	auth := req.Header.Get("Authorization")
-	if auth == "Bearer "+r.workerKey {
-		return true
+	if key := r.workerKeyFn(); key == "" || auth == "Bearer "+key {
+		return true // TOFU mode (key=="") or matching key
 	}
 	if auth == "Bearer "+r.apiKey {
 		return true

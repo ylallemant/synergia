@@ -11,14 +11,14 @@ import (
 
 // ConsentAPI handles worker consent and configuration endpoints.
 type ConsentAPI struct {
-	workerKey string
-	store     *store.Store
+	workerKeyFn func() string
+	store       *store.Store
 }
 
-func NewConsentAPI(workerKey string, s *store.Store) *ConsentAPI {
+func NewConsentAPI(workerKeyFn func() string, s *store.Store) *ConsentAPI {
 	return &ConsentAPI{
-		workerKey: workerKey,
-		store:     s,
+		workerKeyFn: workerKeyFn,
+		store:       s,
 	}
 }
 
@@ -258,12 +258,16 @@ func (c *ConsentAPI) setConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *ConsentAPI) authenticate(r *http.Request) bool {
-	if apiKey := r.Header.Get("X-API-Key"); apiKey == c.workerKey {
+	key := c.workerKeyFn()
+	if key == "" {
+		return true // TOFU mode — no key required
+	}
+	if apiKey := r.Header.Get("X-API-Key"); apiKey == key {
 		return true
 	}
 	auth := r.Header.Get("Authorization")
 	if len(auth) > 7 && auth[:7] == "Bearer " {
-		return auth[7:] == c.workerKey
+		return auth[7:] == key
 	}
 	return false
 }

@@ -152,7 +152,7 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("model store error")
 	}
-	modelsAPI := api.NewModelsDownloadAPI(cfg.WorkerKey, modelStore)
+	modelsAPI := api.NewModelsDownloadAPI(gw.WorkerKey, modelStore)
 
 	// Compute and store file hashes for any roles that have a model filename but no file hash yet
 	roles, _ := db.GetRoleModels()
@@ -172,13 +172,14 @@ func main() {
 		}
 	}
 
-	consentAPI := api.NewConsentAPI(cfg.WorkerKey, db)
-	// Worker-facing APIs
-	brandingAPI := api.NewBrandingAPI(cfg.WorkerKey, db)
-	rolesAPI := api.NewRolesAPI(cfg.APIKey, cfg.WorkerKey, db, cfg.TestSetup)
-	errorsAPI := api.NewErrorsAPI(cfg.WorkerKey, db)
+	consentAPI := api.NewConsentAPI(gw.WorkerKey, db)
+	// Worker-facing APIs — all use gw.WorkerKey so they reflect live auth-mode
+	// changes (e.g. TOFU toggle via admin UI) without a manager restart.
+	brandingAPI := api.NewBrandingAPI(gw.WorkerKey, db)
+	rolesAPI := api.NewRolesAPI(cfg.APIKey, gw.WorkerKey, db, cfg.TestSetup)
+	errorsAPI := api.NewErrorsAPI(gw.WorkerKey, db)
 	versionAPI := api.NewVersionAPI()
-	backendAPI := api.NewBackendAPI(cfg.WorkerKey, db, filepath.Join(cfg.CacheDir, "backend"))
+	backendAPI := api.NewBackendAPI(gw.WorkerKey, db, filepath.Join(cfg.CacheDir, "backend"))
 
 	// Initialize latency monitor
 	latencyMonitor := latency.New(db, cfg.LatencyBuckets, cfg.LatencyWindowHours)

@@ -21,6 +21,7 @@ import (
 	"github.com/ylallemant/synergia/internal/client/autostart"
 	"github.com/ylallemant/synergia/internal/client/backend"
 	"github.com/ylallemant/synergia/internal/client/branding"
+	"github.com/ylallemant/synergia/internal/client/logbuffer"
 	"github.com/ylallemant/synergia/internal/client/browser"
 	"github.com/ylallemant/synergia/internal/client/config"
 	"github.com/ylallemant/synergia/internal/client/connection"
@@ -41,7 +42,7 @@ import (
 
 const dashboardAddr = "127.0.0.1:9876"
 
-func initLogger() {
+func initLogger(buf *logbuffer.Buffer) {
 	noColor := true
 	if fi, err := os.Stdout.Stat(); err == nil {
 		noColor = (fi.Mode() & os.ModeCharDevice) == 0
@@ -63,7 +64,9 @@ func initLogger() {
 	}
 	zerolog.SetGlobalLevel(level)
 
-	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
+	// Write to console AND to the in-memory ring buffer (for /api/logs SSE).
+	multi := zerolog.MultiLevelWriter(output, buf)
+	log.Logger = zerolog.New(multi).With().Timestamp().Caller().Logger()
 }
 
 func main() {
@@ -75,7 +78,8 @@ func main() {
 		}
 	}
 
-	initLogger()
+	logBuf := logbuffer.New(500)
+	initLogger(logBuf)
 
 	// Top-level panic recovery — report to manager if possible, then re-panic
 	defer func() {
@@ -92,7 +96,7 @@ func main() {
 
 	// Unconfigured mode: no manager URL — start dashboard and wait for user input
 	if cfg.Unconfigured {
-		runUnconfigured(cfg)
+		runUnconfigured(cfg, logBuf)
 		return
 	}
 
@@ -181,7 +185,7 @@ func main() {
 		return nil
 	})
 
-	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr)
+	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf)
 	adminURL := localAdminURL(cfg.ManagerURL, cfg.WorkerKey)
 	t := tray.New(sp, "http://"+dashboardAddr+"/static/index.html", adminURL)
 
@@ -292,7 +296,7 @@ func main() {
 // It starts only the local dashboard, opens the browser, and waits for the user
 // to submit a manager URL via the dashboard form. Once configured, it exits so
 // the process can restart with the new configuration (via autostart or manually).
-func runUnconfigured(cfg *config.Config) {
+func runUnconfigured(cfg *config.Config, logBuf *logbuffer.Buffer) {
 	log.Warn().Msg("no manager URL configured — starting in setup mode")
 	log.Info().Str("dashboard", "http://"+dashboardAddr+"/static/index.html").Msg("open the dashboard to configure the manager URL")
 
@@ -312,7 +316,7 @@ func runUnconfigured(cfg *config.Config) {
 	brandingMgr := branding.New(cfg.DataDir, "", "")
 	autostartMgr := autostart.New(execPath(), os.Args[1:])
 
-	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr)
+	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf)
 
 	// When user submits a URL, save it to a config file and exit for restart
 	srv.SetManagerURLCallback(func(managerURL string) {

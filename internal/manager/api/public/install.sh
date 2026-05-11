@@ -106,7 +106,9 @@ if [ "$OS" = "darwin" ]; then
 </dict>
 </plist>
 EOF
-  launchctl load "$PLIST_FILE" 2>/dev/null || true
+  # Unload first so a running instance is stopped and the new binary takes effect.
+  launchctl unload "$PLIST_FILE" 2>/dev/null || true
+  launchctl load   "$PLIST_FILE" 2>/dev/null || true
   echo "Auto-start configured (macOS LaunchAgent)."
 elif [ "$OS" = "linux" ]; then
   SYSTEMD_DIR="$HOME/.config/systemd/user"
@@ -128,7 +130,7 @@ WantedBy=default.target
 EOF
   systemctl --user daemon-reload 2>/dev/null || true
   systemctl --user enable synergia-client 2>/dev/null || true
-  systemctl --user start synergia-client 2>/dev/null || true
+  systemctl --user restart synergia-client 2>/dev/null || true
   echo "Auto-start configured (systemd user service)."
 fi
 
