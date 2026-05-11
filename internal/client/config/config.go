@@ -98,7 +98,7 @@ func Load() (*Config, error) {
 	defaultURL := envOrDefault("CLUSTER_MANAGER_URL", resolveManagerURL())
 
 	flag.StringVar(&cfg.ManagerURL, "manager-url", defaultURL, "WebSocket URL of the cluster manager")
-	flag.StringVar(&cfg.LLMURL, "llm-url", envOrDefault("WORKER_LLM_URL", "http://localhost:8080"), "Local llama-server endpoint")
+	flag.StringVar(&cfg.LLMURL, "llm-url", envOrDefault("WORKER_LLM_URL", "http://localhost:9877"), "Local llama-server endpoint")
 	flag.StringVar(&cfg.Model, "model", envOrDefault("WORKER_MODEL", "SmolLM2-135M-Instruct"), "Model name to report")
 	flag.StringVar(&cfg.Quantisation, "quantisation", envOrDefault("WORKER_QUANTISATION", "Q4_K_M"), "Quantisation level to report")
 	flag.StringVar(&cfg.Role, "role", envOrDefault("WORKER_ROLE", "tester"), "Worker role (embedding, inference, ingestion, tester)")

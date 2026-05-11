@@ -13,20 +13,65 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/ylallemant/synergia/internal/protocol"
 )
 
-// Manager handles downloading and managing the llama-server backend binary.
+// LlamaParams holds llama-server startup parameters pushed by the manager.
+type LlamaParams struct {
+	ContextSize    int
+	ParallelSlots  int
+	GPULayers      int
+	EndpointType   string // "chat" (default) or "embeddings"
+	FlashAttention bool
+}
+
+// DefaultLlamaParams returns conservative defaults suitable for first launch.
+func DefaultLlamaParams() LlamaParams {
+	return LlamaParams{
+		ContextSize:   4096,
+		ParallelSlots: 1,
+		GPULayers:     -1, // all layers on GPU
+		EndpointType:  "chat",
+	}
+}
+
+// BuildArgs constructs the llama-server command-line argument slice.
+func BuildArgs(port, modelPath string, p LlamaParams) []string {
+	args := []string{
+		"--port", port,
+		"--model", modelPath,
+		"--ctx-size", strconv.Itoa(p.ContextSize),
+		"--parallel", strconv.Itoa(p.ParallelSlots),
+		"--n-gpu-layers", strconv.Itoa(p.GPULayers),
+	}
+	if p.FlashAttention {
+		args = append(args, "--flash-attn")
+	}
+	if p.EndpointType == "embeddings" {
+		args = append(args, "--embeddings")
+	}
+	return args
+}
+
+// Manager handles downloading, installing, and running the llama-server backend binary.
 type Manager struct {
 	workerKey      string
 	managerHTTPURL string
 	dataDir        string
 	currentHash    string // SHA256 of the currently installed backend binary
 	binaryPath     string // path to the installed backend binary
+
+	procMu    sync.Mutex
+	proc      *exec.Cmd
+	lastPort  string
+	lastModel string
+	lastParams LlamaParams
 }
 
 // New creates a new backend Manager.
@@ -154,6 +199,81 @@ func (m *Manager) Verify() error {
 		return fmt.Errorf("backend binary verification failed: %w (output: %s)", err, string(output))
 	}
 	return nil
+}
+
+// Start stops any running instance then launches llama-server on the given port.
+func (m *Manager) Start(port, modelPath string, p LlamaParams) error {
+	m.procMu.Lock()
+	defer m.procMu.Unlock()
+
+	m.stopLocked()
+
+	if !m.isInstalledLocked() {
+		return fmt.Errorf("llama-server binary not found at %s", m.binaryPath)
+	}
+
+	cmd := exec.Command(m.binaryPath, BuildArgs(port, modelPath, p)...)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start llama-server: %w", err)
+	}
+
+	m.proc = cmd
+	m.lastPort = port
+	m.lastModel = modelPath
+	m.lastParams = p
+
+	log.Info().
+		Str("port", port).
+		Str("model", filepath.Base(modelPath)).
+		Int("ctx_size", p.ContextSize).
+		Int("gpu_layers", p.GPULayers).
+		Msg("llama-server started")
+	return nil
+}
+
+// Stop kills the running llama-server process if any.
+func (m *Manager) Stop() {
+	m.procMu.Lock()
+	defer m.procMu.Unlock()
+	m.stopLocked()
+}
+
+// Restart stops the current instance and starts a new one with the last stored params.
+func (m *Manager) Restart() error {
+	m.procMu.Lock()
+	port := m.lastPort
+	modelPath := m.lastModel
+	params := m.lastParams
+	m.procMu.Unlock()
+
+	if port == "" || modelPath == "" {
+		return fmt.Errorf("Restart called before any successful Start")
+	}
+	return m.Start(port, modelPath, params)
+}
+
+// IsRunning reports whether a llama-server process is currently running.
+func (m *Manager) IsRunning() bool {
+	m.procMu.Lock()
+	defer m.procMu.Unlock()
+	return m.proc != nil
+}
+
+// stopLocked kills the process. Caller must hold procMu.
+func (m *Manager) stopLocked() {
+	if m.proc == nil {
+		return
+	}
+	_ = m.proc.Process.Kill()
+	_ = m.proc.Wait()
+	m.proc = nil
+	log.Info().Msg("llama-server stopped")
+}
+
+// isInstalledLocked is like IsInstalled but assumes procMu is already held.
+func (m *Manager) isInstalledLocked() bool {
+	_, err := os.Stat(m.binaryPath)
+	return err == nil
 }
 
 func (m *Manager) download(url string) (string, error) {

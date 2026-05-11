@@ -45,6 +45,7 @@ import (
 )
 
 const dashboardAddr = "127.0.0.1:9876"
+const llamaPort = "9877"
 
 // initLogger sets up zerolog. extra writers (e.g. a log file) are added after
 // the console and ring buffer. Call it twice: once before config.Load(), and
@@ -226,10 +227,22 @@ func main() {
 	// Configure backend (llama-server) manager
 	backendMgr := backend.New(cfg.WorkerKey, managerHTTPURL, cfg.DataDir)
 	conn.SetBackendHash(backendMgr.Hash())
+	defer backendMgr.Stop()
+
+	// Start llama-server immediately if the binary and model file are already on disk.
+	if backendMgr.IsInstalled() && cfg.ModelFile != "" {
+		if err := backendMgr.Start(llamaPort, cfg.ModelFile, backend.DefaultLlamaParams()); err != nil {
+			log.Warn().Err(err).Msg("failed to start llama-server — will start after first model update")
+		}
+	}
+
 	w.SetBackendManager(backendMgr, func() error {
-		// TODO: restart llama-server process with new binary path
-		log.Info().Str("path", backendMgr.BinaryPath()).Msg("backend updated — llama-server restart needed")
-		return nil
+		// Binary updated — restart with the same model and parameters.
+		return backendMgr.Restart()
+	})
+	w.SetLLMRestarter(func(modelPath string, p backend.LlamaParams) error {
+		// Model updated — restart with the new model file and manager-supplied parameters.
+		return backendMgr.Start(llamaPort, modelPath, p)
 	})
 
 	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath, cfg.DataDir)

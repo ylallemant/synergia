@@ -70,7 +70,8 @@ type Worker struct {
 	updater        *updater.Updater
 	backendMgr     *backend.Manager
 	restartFn      func()       // called after successful binary update
-	backendRestart func() error // called after backend update (restart llama-server)
+	backendRestart func() error // called after backend binary update (restart llama-server)
+	restartLLM     func(modelPath string, p backend.LlamaParams) error // called after model update
 	role           string
 	modelsDir      string
 	managerHTTPURL string
@@ -106,10 +107,16 @@ func (w *Worker) SetUpdater(u *updater.Updater, restartFn func()) {
 }
 
 // SetBackendManager configures the backend binary manager.
-// backendRestart is called after a successful backend update (should restart llama-server).
+// backendRestart is called after a successful backend binary update (should restart llama-server).
 func (w *Worker) SetBackendManager(mgr *backend.Manager, backendRestart func() error) {
 	w.backendMgr = mgr
 	w.backendRestart = backendRestart
+}
+
+// SetLLMRestarter configures the callback invoked after a model update to restart llama-server
+// with the new model file and parameters.
+func (w *Worker) SetLLMRestarter(fn func(modelPath string, p backend.LlamaParams) error) {
+	w.restartLLM = fn
 }
 
 // Run starts the work processing loop. Blocks until ctx is cancelled.
@@ -402,6 +409,20 @@ func (w *Worker) handleModelUpdate(mu *protocol.ModelUpdate) {
 
 	if err := w.conn.SendLLMHashReport(newHash); err != nil {
 		log.Error().Err(err).Msg("failed to send LLM hash report after model update")
+	}
+
+	// Restart llama-server with the new model file and parameters from the manager.
+	if w.restartLLM != nil {
+		p := backend.LlamaParams{
+			ContextSize:    mu.ContextSize,
+			ParallelSlots:  mu.ParallelSlots,
+			GPULayers:      mu.GPULayers,
+			EndpointType:   mu.EndpointType,
+			FlashAttention: mu.FlashAttention,
+		}
+		if err := w.restartLLM(modelPath, p); err != nil {
+			log.Warn().Err(err).Msg("failed to restart llama-server after model update")
+		}
 	}
 
 	_ = w.conn.SendStatus("available")
