@@ -94,10 +94,22 @@ func (s *Store) SetWorkerOnlineIfAllowed(fingerprint string) {
 }
 
 // SetWorkerOffline marks a worker as offline.
+// A deleted worker's status is not overwritten — the record is kept as-is.
 func (s *Store) SetWorkerOffline(fingerprint string) error {
 	return s.DB.Model(&Worker{}).
-		Where("fingerprint = ?", fingerprint).
+		Where("fingerprint = ? AND status != ?", fingerprint, "deleted").
 		Update("status", "offline").Error
+}
+
+// SetWorkerDeleted marks a worker as permanently uninstalled.
+// The record is kept in the database for historical reference; the status will
+// not be overwritten by a subsequent disconnect (SetWorkerOffline guards it).
+// If the same worker reconnects later (reinstall), UpsertWorker sets it back
+// to "online" as part of the normal handshake.
+func (s *Store) SetWorkerDeleted(fingerprint string) error {
+	return s.DB.Model(&Worker{}).
+		Where("fingerprint = ?", fingerprint).
+		Update("status", "deleted").Error
 }
 
 // SetWorkerStatus updates the worker's status (e.g., "available", "idle", "processing").

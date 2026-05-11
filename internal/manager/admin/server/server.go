@@ -192,6 +192,7 @@ func (s *Server) collectData() dashboardData {
 	data.ProcessingWorkers = stats.ProcessingWorkers
 	data.UnavailableWorkers = stats.UnavailableWorkers
 	data.OfflineWorkers = stats.OfflineWorkers
+	data.DeletedWorkers = stats.DeletedWorkers
 
 	for _, rc := range stats.RoleCounts {
 		data.RoleCounts = append(data.RoleCounts, roleCount{Role: rc.Role, Online: rc.Online, Total: rc.Total})
@@ -260,6 +261,7 @@ type dashboardData struct {
 	ProcessingWorkers  int64
 	UnavailableWorkers int64
 	OfflineWorkers     int64
+	DeletedWorkers     int64
 	RoleCounts         []roleCount
 	TodayTotal         int64
 	TodayCompleted     int64

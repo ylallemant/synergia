@@ -159,7 +159,54 @@
                 View Logs
             </button>
         </div>
+
+        <hr style="border:none;border-top:1px solid #2a2a2a;margin:0.5rem 1.5rem">
+
+        <div style="text-align:center;padding:1.25rem 0 2rem">
+            <div id="uninstall-confirm" style="display:none;font-size:0.8rem;color:#94a3b8;margin-bottom:0.75rem">
+                This will remove the client binary, llama-server, model files and config.<br>
+                Your worker identity (keypair) will be preserved.
+                <div style="margin-top:0.6rem;display:flex;gap:0.75rem;justify-content:center">
+                    <button onclick="cancelUninstall()"
+                            style="background:none;border:1px solid #334155;color:#64748b;border-radius:6px;padding:0.35rem 1rem;font-size:0.8rem;cursor:pointer">
+                        Cancel
+                    </button>
+                    <button onclick="confirmUninstall()"
+                            style="background:#7f1d1d;border:1px solid #991b1b;color:#fca5a5;border-radius:6px;padding:0.35rem 1rem;font-size:0.8rem;font-weight:600;cursor:pointer">
+                        Yes, Uninstall
+                    </button>
+                </div>
+            </div>
+            <button id="uninstall-btn" onclick="startUninstall()"
+                    style="background:none;border:1px solid #991b1b;color:#f87171;border-radius:6px;padding:0.4rem 1.2rem;font-size:0.8rem;cursor:pointer">
+                Uninstall
+            </button>
+        </div>
     </div>
+
+    <script>
+        function startUninstall() {
+            document.getElementById('uninstall-btn').style.display = 'none';
+            document.getElementById('uninstall-confirm').style.display = '';
+        }
+        function cancelUninstall() {
+            document.getElementById('uninstall-confirm').style.display = 'none';
+            document.getElementById('uninstall-btn').style.display = '';
+        }
+        async function confirmUninstall() {
+            document.getElementById('uninstall-confirm').innerHTML =
+                '<span style="color:#f87171">Uninstalling…</span>';
+            try {
+                const r = await fetch('/api/uninstall', {method:'POST'});
+                if (!r.ok) {
+                    const msg = await r.text();
+                    document.getElementById('uninstall-confirm').innerHTML =
+                        '<span style="color:#f87171">' + msg + '</span>';
+                    document.getElementById('uninstall-btn').style.display = '';
+                }
+            } catch { /* process exited — page will become unreachable */ }
+        }
+    </script>
 
     <script>
         // Detect unconfigured state: if the status response shows no connection

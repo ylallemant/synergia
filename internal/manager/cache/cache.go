@@ -56,6 +56,7 @@ type DashboardStats struct {
 	// for its role. This is what directly gates work dispatch.
 	ModelSynced    int64
 	ModelOutOfSync int64
+	DeletedWorkers int64
 	Roles              []RoleEntry
 }
 
@@ -186,10 +187,11 @@ func (c *Cache) refreshStats() {
 	db.Model(&store.Worker{}).Where("status = ? AND sync_status = ?", "processing", "synced").Count(&stats.ProcessingWorkers)
 	db.Model(&store.Worker{}).Where("status != ? AND NOT (status IN ? AND sync_status = ?) AND NOT (status = ? AND sync_status = ?)", "offline", []string{"available", "online"}, "synced", "processing", "synced").Count(&stats.UnavailableWorkers)
 	db.Model(&store.Worker{}).Where("status = ?", "offline").Count(&stats.OfflineWorkers)
+	db.Model(&store.Worker{}).Where("status = ?", "deleted").Count(&stats.DeletedWorkers)
 
 	// LLM model sync — independent of binary/backend version targets
-	db.Model(&store.Worker{}).Where("status != ? AND sync_status = ?", "offline", "synced").Count(&stats.ModelSynced)
-	db.Model(&store.Worker{}).Where("status != ? AND sync_status = ?", "offline", "out-of-sync").Count(&stats.ModelOutOfSync)
+	db.Model(&store.Worker{}).Where("status NOT IN ? AND sync_status = ?", []string{"offline", "deleted"}, "synced").Count(&stats.ModelSynced)
+	db.Model(&store.Worker{}).Where("status NOT IN ? AND sync_status = ?", []string{"offline", "deleted"}, "out-of-sync").Count(&stats.ModelOutOfSync)
 
 	// Workers by role
 	type roleRow struct {

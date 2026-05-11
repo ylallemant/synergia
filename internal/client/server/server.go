@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -52,14 +54,39 @@ type Server struct {
 	autostart   *autostart.Manager
 	logBuf      *logbuffer.Buffer
 	logFilePath string // path to the per-run log file; empty if unavailable
+	dataDir     string // worker data directory (identity, config, models, backend)
 	hwInfo      hwinfo.Info
 	server      *http.Server
 
 	// onManagerURLSet is called when the user configures a manager URL in setup mode.
 	onManagerURLSet func(url string)
+	// onGoodbye is called during uninstall to notify the manager before exit.
+	onGoodbye func()
+	// uninstallFn replaces doUninstall in tests so os.Exit is never called.
+	uninstallFn func()
 }
 
-func New(addr string, status StatusProvider, consentMgr *consent.Manager, configMgr *workerconfig.Manager, brandingMgr *branding.Manager, autostartMgr *autostart.Manager, buf *logbuffer.Buffer, logFilePath string) *Server {
+// SetGoodbyeCallback registers the function called when the worker uninstalls.
+func (s *Server) SetGoodbyeCallback(fn func()) { s.onGoodbye = fn }
+
+// BuildGoodbyeBody constructs the signed goodbye JSON body that the worker
+// sends to the manager on uninstall. Extracted as a package-level function
+// so it can be unit-tested independently of the HTTP plumbing.
+//
+//   - fingerprint: hex-encoded SHA256 of the worker's Ed25519 public key
+//   - signFn: func that signs a byte slice and returns a hex-encoded signature
+//   - now: the timestamp to embed (caller controls for deterministic tests)
+func BuildGoodbyeBody(fingerprint string, signFn func([]byte) string, now time.Time) ([]byte, error) {
+	payload := "goodbye:" + fingerprint + ":" + now.UTC().Format(time.RFC3339)
+	sig := signFn([]byte(payload))
+	return json.Marshal(map[string]string{
+		"fingerprint": fingerprint,
+		"payload":     payload,
+		"signature":   sig,
+	})
+}
+
+func New(addr string, status StatusProvider, consentMgr *consent.Manager, configMgr *workerconfig.Manager, brandingMgr *branding.Manager, autostartMgr *autostart.Manager, buf *logbuffer.Buffer, logFilePath, dataDir string) *Server {
 	return &Server{
 		addr:        addr,
 		status:      status,
@@ -69,6 +96,7 @@ func New(addr string, status StatusProvider, consentMgr *consent.Manager, config
 		autostart:   autostartMgr,
 		logBuf:      buf,
 		logFilePath: logFilePath,
+		dataDir:     dataDir,
 		hwInfo:      hwinfo.Collect(),
 	}
 }
@@ -94,6 +122,7 @@ func (s *Server) Run(ctx context.Context) {
 	mux.HandleFunc("/api/logs", s.handleLogs)
 	mux.HandleFunc("/api/logs-file", s.handleLogsFile)
 	mux.HandleFunc("/api/log-level", s.handleLogLevel)
+	mux.HandleFunc("/api/uninstall", s.handleUninstall)
 
 	// Dynamic branding CSS (served from manager cache)
 	mux.HandleFunc("/static/branding.css", s.handleBrandingCSS)
@@ -457,6 +486,115 @@ func (s *Server) handleManagerURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleUninstall removes the client binary, app bundle, autostart service,
+// cached llama.cpp binary, downloaded models, and non-identity config files,
+// then exits so the process cleans up fully. Identity keypair files are
+// preserved so the manager still recognises the worker on reinstall.
+// Returns 400 on Windows where deleting a running binary is not supported.
+func (s *Server) handleUninstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if runtime.GOOS == "windows" {
+		http.Error(w,
+			"Uninstall is not supported from the dashboard on Windows. "+
+				"Use the Synergia entry in Windows Settings → Apps to uninstall.",
+			http.StatusBadRequest)
+		return
+	}
+
+	log.Info().Msg("uninstall requested — cleaning up")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "uninstalling"})
+
+	// Flush the response before we exit.
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
+	// Give the browser a moment to receive the response, then notify the
+	// manager and run cleanup. Goodbye runs first so the manager marks the
+	// worker deleted before we go dark.
+	uninstall := s.uninstallFn
+	if uninstall == nil {
+		uninstall = s.doUninstall
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		if s.onGoodbye != nil {
+			s.onGoodbye()
+		}
+		uninstall()
+	}()
+}
+
+// identityFiles are the keypair files created by the identity package.
+// They are preserved on uninstall so the manager still recognises the worker.
+var identityFiles = map[string]bool{
+	"identity.enc": true,
+	"identity.pub": true,
+	"fingerprint":  true,
+}
+
+func (s *Server) doUninstall() {
+	// 1. Disable and remove the autostart service.
+	if s.autostart != nil {
+		if err := s.autostart.Disable(); err != nil {
+			log.Warn().Err(err).Msg("uninstall: failed to disable autostart")
+		}
+	}
+
+	// 2. Remove cached llama-server binary.
+	backendDir := filepath.Join(s.dataDir, "backend")
+	if err := os.RemoveAll(backendDir); err != nil {
+		log.Warn().Err(err).Str("dir", backendDir).Msg("uninstall: failed to remove backend dir")
+	}
+
+	// 3. Remove downloaded model files.
+	modelsDir := filepath.Join(s.dataDir, "models")
+	if err := os.RemoveAll(modelsDir); err != nil {
+		log.Warn().Err(err).Str("dir", modelsDir).Msg("uninstall: failed to remove models dir")
+	}
+
+	// 4. Remove known config / log files — but NOT the identity keypair.
+	toDelete := []string{"manager-url", "worker-key", "client.log", "stdout.log", "stderr.log"}
+	for _, name := range toDelete {
+		path := filepath.Join(s.dataDir, name)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			log.Warn().Err(err).Str("file", path).Msg("uninstall: failed to remove file")
+		}
+	}
+
+	// 5. Remove the client binary (safe on macOS/Linux — kernel holds inode open).
+	exe, err := os.Executable()
+	if err == nil {
+		exe, _ = filepath.EvalSymlinks(exe)
+
+		// If running inside a .app bundle, remove the whole bundle.
+		if idx := strings.Index(exe, ".app/Contents/MacOS/"); idx != -1 {
+			appBundle := exe[:idx+4] // up to and including ".app"
+			log.Info().Str("bundle", appBundle).Msg("uninstall: removing .app bundle")
+			os.RemoveAll(appBundle)
+		} else {
+			log.Info().Str("binary", exe).Msg("uninstall: removing binary")
+			os.Remove(exe)
+		}
+
+		// Also remove the binary from ~/.local/bin if it exists there separately.
+		if home, err := os.UserHomeDir(); err == nil {
+			localBin := filepath.Join(home, ".local", "bin", "synergia-client")
+			if localBin != exe {
+				os.Remove(localBin)
+			}
+		}
+	}
+
+	log.Info().Msg("uninstall complete")
+	os.Exit(0)
 }
 
 // handleLogsFile serves the full per-run log file as newline-delimited JSON so

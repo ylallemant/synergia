@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -228,9 +229,28 @@ func main() {
 		return nil
 	})
 
-	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath)
+	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath, cfg.DataDir)
 	adminURL := localAdminURL(cfg.ManagerURL, cfg.WorkerKey)
 	t := tray.New(sp, "http://"+dashboardAddr+"/static/index.html", adminURL)
+
+	// When the user uninstalls via the dashboard, notify the manager with a
+	// signed goodbye message so it marks the worker as "deleted".
+	// managerHTTPURL and id are already defined above.
+	goodbyeURL := managerHTTPURL + "/v1/workers/goodbye"
+	srv.SetGoodbyeCallback(func() {
+		body, err := server.BuildGoodbyeBody(id.Fingerprint, id.Sign, time.Now())
+		if err != nil {
+			log.Warn().Err(err).Msg("uninstall: failed to build goodbye body")
+			return
+		}
+		resp, err := http.Post(goodbyeURL, "application/json", bytes.NewReader(body))
+		if err != nil {
+			log.Warn().Err(err).Msg("uninstall: failed to notify manager")
+			return
+		}
+		resp.Body.Close()
+		log.Info().Msg("uninstall: manager notified")
+	})
 
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -362,7 +382,7 @@ func runUnconfigured(cfg *config.Config, logBuf *logbuffer.Buffer, logFilePath s
 	brandingMgr := branding.New(cfg.DataDir, "", "")
 	autostartMgr := autostart.New(execPath(), os.Args[1:])
 
-	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath)
+	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath, cfg.DataDir)
 
 	// When user submits a URL, save it to a config file and exit for restart
 	srv.SetManagerURLCallback(func(managerURL string) {

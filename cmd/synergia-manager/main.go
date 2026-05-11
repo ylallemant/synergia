@@ -242,6 +242,10 @@ func main() {
 	// Client error reporting API (authenticated with worker key)
 	mux.HandleFunc("/v1/errors", errorsAPI.ErrorsHandler)
 
+	// Worker uninstall notification — no auth required; fingerprint identifies the worker.
+	goodbyeAPI := api.NewGoodbyeAPI(db)
+	mux.HandleFunc("/v1/workers/goodbye", goodbyeAPI.GoodbyeHandler)
+
 	// Public pages (no auth required)
 	downloadAPI := api.NewDownloadAPI(cfg.ClientBinaryDir, cfg.CacheDir, adminCache)
 	communityAPI := api.NewCommunityAPI(db)

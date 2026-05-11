@@ -34,5 +34,6 @@ func (a *AdminStatsAPI) StatsHandler(w http.ResponseWriter, r *http.Request) {
 		"backend_version":   stats.BackendVersion,
 		"model_synced":      stats.ModelSynced,
 		"model_out_of_sync": stats.ModelOutOfSync,
+		"deleted_workers":   stats.DeletedWorkers,
 	})
 }
