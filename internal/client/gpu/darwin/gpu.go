@@ -3,6 +3,7 @@ package darwin
 
 import (
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -27,80 +28,41 @@ func (p *Prober) Utilization() (int, error) {
 		return 0, err
 	}
 
-	if pct := parseIORegUtilization(string(out)); pct > 0 {
-		return pct, nil
-	}
-
-	// Fallback: detect known GPU-heavy processes
-	return detectGPUProcesses(), nil
+	return parseIORegUtilization(string(out)), nil
 }
 
-// parseIORegUtilization extracts GPU utilization from ioreg output.
-func parseIORegUtilization(output string) int {
+// utilPatterns matches "Key"=<integer> pairs that may appear either as
+// standalone lines or embedded inside a PerformanceStatistics dictionary
+// on a single line. regexp.QuoteMeta escapes the parens in "GPU Activity(%)".
+var utilPatterns = func() []*regexp.Regexp {
 	keys := []string{
-		"\"GPU Activity(%)\"",
-		"\"Device Utilization %\"",
-		"\"GPU Core Utilization(%)\"",
+		`"GPU Activity(%)"`,
+		`"Device Utilization %"`,
+		`"GPU Core Utilization(%)"`,
+		`"Renderer Utilization %"`,
 	}
+	re := make([]*regexp.Regexp, 0, len(keys))
+	for _, k := range keys {
+		re = append(re, regexp.MustCompile(regexp.QuoteMeta(k)+`=(\d+)`))
+	}
+	return re
+}()
 
-	for _, line := range strings.Split(output, "\n") {
-		for _, key := range keys {
-			if strings.Contains(line, key) {
-				return extractPercentage(line)
+// parseIORegUtilization extracts GPU utilisation from ioreg output.
+// ioreg on Apple Silicon bundles all stats into a single-line dictionary:
+//
+//	"PerformanceStatistics" = {"Device Utilization %"=24,"Tiler Utilization %"=24,...}
+//
+// The previous line-split + last-field approach failed for that layout.
+// Regex finds the value immediately after the key regardless of surrounding text.
+func parseIORegUtilization(output string) int {
+	for _, re := range utilPatterns {
+		if m := re.FindStringSubmatch(output); len(m) >= 2 {
+			if v, err := strconv.Atoi(m[1]); err == nil {
+				return v
 			}
 		}
 	}
-
-	return 0
-}
-
-// extractPercentage pulls a numeric value from an ioreg line like:
-//
-//	"GPU Activity(%)" = 75
-func extractPercentage(line string) int {
-	parts := strings.Split(line, "=")
-	if len(parts) < 2 {
-		return 0
-	}
-	numStr := strings.TrimSpace(parts[len(parts)-1])
-	numStr = strings.Trim(numStr, "\"")
-	val, err := strconv.Atoi(numStr)
-	if err != nil {
-		fval, ferr := strconv.ParseFloat(numStr, 64)
-		if ferr != nil {
-			return 0
-		}
-		return int(fval)
-	}
-	return val
-}
-
-// detectGPUProcesses checks for known GPU-intensive applications on macOS.
-func detectGPUProcesses() int {
-	gpuProcesses := []string{
-		"MTLCompilerServi", // Metal shader compilation (games)
-		"Steam",
-		"steamwebhelper",
-		"Blender",
-		"DaVinci Resolve",
-		"Final Cut Pro",
-		"Compressor",
-		"Unity",
-		"Unreal",
-	}
-
-	out, err := exec.Command("ps", "-eo", "comm").Output()
-	if err != nil {
-		return 0
-	}
-
-	processes := string(out)
-	for _, proc := range gpuProcesses {
-		if strings.Contains(processes, proc) {
-			return 80 // Assume high utilization when a known GPU process is running
-		}
-	}
-
 	return 0
 }
 

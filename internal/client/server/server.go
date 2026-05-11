@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -34,6 +35,8 @@ type StatusProvider interface {
 	IsPaused() bool
 	GPUState() gpu.State
 	GPUUtilization() int
+	GPUSentAvg() int
+	GPUStats() gpu.GPUStats
 	GPUSupported() (bool, string)
 	GPUDriverInfo() (string, string)
 	LLMReachable() (bool, string)
@@ -64,6 +67,11 @@ type Server struct {
 	onGoodbye func()
 	// uninstallFn replaces doUninstall in tests so os.Exit is never called.
 	uninstallFn func()
+
+	// SSE subscribers for /api/status-events
+	statusSubsMu sync.Mutex
+	statusSubs   map[int]chan []byte
+	statusSubsID int
 }
 
 // SetGoodbyeCallback registers the function called when the worker uninstalls.
@@ -98,6 +106,7 @@ func New(addr string, status StatusProvider, consentMgr *consent.Manager, config
 		logFilePath: logFilePath,
 		dataDir:     dataDir,
 		hwInfo:      hwinfo.Collect(),
+		statusSubs:  make(map[int]chan []byte),
 	}
 }
 
@@ -112,6 +121,8 @@ func (s *Server) Run(ctx context.Context) {
 
 	// API endpoints
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/status-events", s.handleStatusEvents)
+	mux.HandleFunc("/api/gpu", s.handleGPU)
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/consent", s.handleConsent)
 	mux.HandleFunc("/api/config", s.handleConfig)
@@ -150,19 +161,16 @@ func (s *Server) Run(ctx context.Context) {
 	}
 }
 
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
+// buildStatusPayload builds the full status JSON snapshot. Called by both
+// handleStatus (on-demand HTTP) and BroadcastStatus (SSE push on change).
+func (s *Server) buildStatusPayload() []byte {
 	consentState := s.consent.GetState()
 	cfg := s.config.Get()
 	gpuSupported, gpuSupportReason := s.status.GPUSupported()
 	gpuDriver, gpuDriverVersion := s.status.GPUDriverInfo()
 	llmReachable, llmError := s.status.LLMReachable()
 
-	status := map[string]any{
+	payload := map[string]any{
 		"connected":          s.status.IsConnected(),
 		"processing":         s.status.IsProcessing(),
 		"paused":             s.status.IsPaused(),
@@ -200,15 +208,118 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"ram_mb":             s.hwInfo.RAMMB,
 		},
 	}
+	b, _ := json.Marshal(payload)
+	return b
+}
 
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(status)
+	w.Write(s.buildStatusPayload()) //nolint:errcheck
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok"}`)
+}
+
+// ── SSE status-event stream ────────────────────────────────────────────────
+
+func (s *Server) subscribeStatus() (int, <-chan []byte) {
+	ch := make(chan []byte, 4)
+	s.statusSubsMu.Lock()
+	id := s.statusSubsID
+	s.statusSubsID++
+	s.statusSubs[id] = ch
+	s.statusSubsMu.Unlock()
+	return id, ch
+}
+
+func (s *Server) unsubscribeStatus(id int) {
+	s.statusSubsMu.Lock()
+	if ch, ok := s.statusSubs[id]; ok {
+		delete(s.statusSubs, id)
+		close(ch)
+	}
+	s.statusSubsMu.Unlock()
+}
+
+// BroadcastStatus is a status.ChangeHandler — registered with
+// status.Provider.AddHandler so it is called whenever the computed status
+// changes. It builds a fresh payload snapshot and pushes it to all open
+// /api/status-events connections.
+func (s *Server) BroadcastStatus(_, _ string) {
+	payload := s.buildStatusPayload()
+	s.statusSubsMu.Lock()
+	for _, ch := range s.statusSubs {
+		select {
+		case ch <- payload:
+		default: // subscriber too slow — drop rather than block
+		}
+	}
+	s.statusSubsMu.Unlock()
+}
+
+// handleStatusEvents streams status changes via Server-Sent Events.
+// On connect it immediately sends the current state, then pushes a new
+// event whenever BroadcastStatus is called (i.e. the status changes).
+func (s *Server) handleStatusEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	if rc := http.NewResponseController(w); rc != nil {
+		_ = rc.SetWriteDeadline(time.Time{})
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Send current state immediately so the page doesn't wait for a change.
+	fmt.Fprintf(w, "data: %s\n\n", s.buildStatusPayload())
+	flusher.Flush()
+
+	id, ch := s.subscribeStatus()
+	defer s.unsubscribeStatus(id)
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case payload, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", payload)
+			flusher.Flush()
+		}
+	}
+}
+
+// handleGPU returns a lightweight snapshot of current GPU utilisation and
+// rolling-window stats. Polled every second by the dashboard for a live load bar.
+func (s *Server) handleGPU(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	stats := s.status.GPUStats()
+	resp := map[string]any{
+		"utilization":      s.status.GPUUtilization(),
+		"state":            s.status.GPUState().String(),
+		"sent_to_manager":  s.status.GPUSentAvg(),
+		"stats":            stats,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }
 
 func (s *Server) handleConsent(w http.ResponseWriter, r *http.Request) {

@@ -41,7 +41,7 @@ func ensureTLSCerts(dir string) (caCert, serverCert, serverKey string, err error
 	caTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			Organization: []string{"DeepThink Test CA"},
+			Organization: []string{"Synergia Test CA"},
 		},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
@@ -70,7 +70,7 @@ func ensureTLSCerts(dir string) (caCert, serverCert, serverKey string, err error
 	srvTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject: pkix.Name{
-			Organization: []string{"DeepThink Test"},
+			Organization: []string{"Synergia Test"},
 			CommonName:   "localhost",
 		},
 		NotBefore: time.Now(),

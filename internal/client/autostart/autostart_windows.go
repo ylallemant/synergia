@@ -10,7 +10,7 @@ import (
 
 const (
 	registryKey   = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-	registryValue = "DeepThinkClusterClient"
+	registryValue = "SynergiaClusterClient"
 )
 
 // IsSupported returns true on Windows.

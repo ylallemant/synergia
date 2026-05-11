@@ -6,20 +6,46 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/ylallemant/synergia/internal/manager/queue"
+	"github.com/ylallemant/synergia/internal/manager/store"
 	"github.com/ylallemant/synergia/internal/protocol"
 )
 
 // newTestGateway creates a Gateway with no store (nil-safe) and a real queue.
 func newTestGateway(workerKey string) *Gateway {
 	return New(workerKey, queue.New(), nil)
+}
+
+// dbCounter gives each test its own named in-memory SQLite database.
+// Plain ":memory:" fails under concurrent goroutines because the connection
+// pool opens a second connection that sees a fresh empty database.
+// A named URI with cache=shared ensures all connections share the same data.
+var dbCounter atomic.Int64
+
+// openTestStore opens a per-test named in-memory SQLite store.
+func openTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	id := dbCounter.Add(1)
+	dsn := fmt.Sprintf("file:gw_test_%d?mode=memory&cache=shared", id)
+	s, err := store.Open(dsn)
+	if err != nil {
+		t.Fatalf("openTestStore: %v", err)
+	}
+	return s
+}
+
+// newTestGatewayWithStore creates a Gateway backed by a real store.
+func newTestGatewayWithStore(workerKey string, s *store.Store) *Gateway {
+	return New(workerKey, queue.New(), s)
 }
 
 // generateWorker creates a fresh Ed25519 keypair and returns the public key,
@@ -341,5 +367,129 @@ func TestSetWorkerKey_LiveChange_ReflectedImmediately(t *testing.T) {
 	gw.SetWorkerKey("")
 	if got := gw.WorkerKey(); got != "" {
 		t.Errorf("want empty string (TOFU mode) after SetWorkerKey(\"\"), got %q", got)
+	}
+}
+
+// ── TypeStatus GPU avg consent gating ─────────────────────────────────────────
+
+// connectWorkerWithStore connects a worker to a gateway backed by a real store,
+// waits for it to register, and returns the client websocket and fingerprint.
+func connectWorkerWithStore(t *testing.T, gw *Gateway, srv *httptest.Server) (*websocket.Conn, string) {
+	t.Helper()
+	_, _, fp, pubB64 := generateWorker(t)
+	conn, _, err := dialWorker(t, srv, fp, pubB64, "secret")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if !waitForWorker(gw, 2*time.Second) {
+		t.Fatal("worker did not connect")
+	}
+	return conn, fp
+}
+
+// waitForGPUAvg polls the store until the worker's GPUAvg matches want or the deadline passes.
+func waitForGPUAvg(s *store.Store, fingerprint string, want int, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		w, err := s.GetWorker(fingerprint)
+		if err == nil && w != nil && w.GPUAvg == want {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+func TestTypeStatus_GPUAvg_StoredWhenConsented(t *testing.T) {
+	s := openTestStore(t)
+	gw := newTestGatewayWithStore("secret", s)
+	srv := httptest.NewServer(gw)
+	defer srv.Close()
+
+	conn, fp := connectWorkerWithStore(t, gw, srv)
+	defer conn.Close()
+
+	// Grant consent before the status message arrives.
+	if err := s.SetConsent(fp, true, true, true, nil); err != nil {
+		t.Fatalf("SetConsent: %v", err)
+	}
+
+	if err := conn.WriteJSON(protocol.Status{
+		Type:   protocol.TypeStatus,
+		State:  "available",
+		GPUAvg: 55,
+	}); err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+
+	if !waitForGPUAvg(s, fp, 55, 2*time.Second) {
+		w, _ := s.GetWorker(fp)
+		got := 0
+		if w != nil {
+			got = w.GPUAvg
+		}
+		t.Errorf("want GPUAvg=55 stored, got %d", got)
+	}
+}
+
+func TestTypeStatus_GPUAvg_NotStoredWithoutConsent(t *testing.T) {
+	s := openTestStore(t)
+	gw := newTestGatewayWithStore("secret", s)
+	srv := httptest.NewServer(gw)
+	defer srv.Close()
+
+	conn, fp := connectWorkerWithStore(t, gw, srv)
+	defer conn.Close()
+
+	// No consent — GPUAvg must not be written.
+	if err := conn.WriteJSON(protocol.Status{
+		Type:   protocol.TypeStatus,
+		State:  "available",
+		GPUAvg: 99,
+	}); err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+
+	// Give the gateway time to process and confirm it was NOT stored.
+	time.Sleep(100 * time.Millisecond)
+	w, err := s.GetWorker(fp)
+	if err != nil {
+		t.Fatalf("GetWorker: %v", err)
+	}
+	if w.GPUAvg != 0 {
+		t.Errorf("GPUAvg must not be stored without consent, got %d", w.GPUAvg)
+	}
+}
+
+func TestTypeStatus_GPUAvg_ZeroNotStored(t *testing.T) {
+	s := openTestStore(t)
+	gw := newTestGatewayWithStore("secret", s)
+	srv := httptest.NewServer(gw)
+	defer srv.Close()
+
+	conn, fp := connectWorkerWithStore(t, gw, srv)
+	defer conn.Close()
+
+	// Consent given; set a known value first, then send GPUAvg=0.
+	s.SetConsent(fp, true, true, true, nil) //nolint:errcheck
+	s.SetWorkerGPUAvg(fp, 42)              //nolint:errcheck
+
+	if err := conn.WriteJSON(protocol.Status{
+		Type:   protocol.TypeStatus,
+		State:  "available",
+		GPUAvg: 0, // omitted — worker has no data yet
+	}); err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+
+	// GPUAvg=0 must not overwrite the previously stored value.
+	time.Sleep(100 * time.Millisecond)
+	w, _ := s.GetWorker(fp)
+	if w == nil || w.GPUAvg != 42 {
+		got := 0
+		if w != nil {
+			got = w.GPUAvg
+		}
+		t.Errorf("GPUAvg=0 must not overwrite stored value, got %d", got)
 	}
 }

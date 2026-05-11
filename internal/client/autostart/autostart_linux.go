@@ -85,7 +85,7 @@ func generateServiceUnit(execPath string, args []string) string {
 	}
 
 	return `[Unit]
-Description=DeepThink Cluster Client
+Description=Synergia Cluster Client
 After=network-online.target
 Wants=network-online.target
 

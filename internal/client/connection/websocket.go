@@ -29,6 +29,7 @@ type Connection struct {
 	quantisation string
 	llmHash      string
 	backendHash  string
+	gpuAvg       int
 	dialer       *websocket.Dialer
 
 	mu   sync.Mutex
@@ -240,10 +241,19 @@ func (c *Connection) readLoop(ctx context.Context) error {
 			c.BackendUpdateCh <- &bu
 
 		case protocol.TypeChallenge:
-			// TOFU mode: manager sent a nonce immediately after upgrade — sign and reply
-			if !handleChallenge(c.conn, message, c.identity.PrivateKey) {
+			// TOFU mode: manager sent a nonce immediately after upgrade.
+			// Build the response without writing, then send through c.Send so the
+			// write goes through the connection mutex — preventing a concurrent-write
+			// panic when another goroutine (e.g. the initial "available" sender) is
+			// also trying to write at the same time.
+			resp, ok := buildChallengeResponse(message, c.identity.PrivateKey)
+			if !ok {
 				return fmt.Errorf("TOFU challenge-response failed")
 			}
+			if err := c.Send(resp); err != nil {
+				return fmt.Errorf("TOFU challenge-response failed: %w", err)
+			}
+			log.Debug().Msg("handshake: challenge-response completed")
 
 		case protocol.TypeHeartbeat:
 			// Manager acknowledged our heartbeat, nothing to do
@@ -289,12 +299,29 @@ func (c *Connection) SendStatus(state string) error {
 	log.Debug().Str("state", state).Msg("sending status update")
 	c.mu.Lock()
 	hash := c.llmHash
+	avg := c.gpuAvg
 	c.mu.Unlock()
 	return c.Send(&protocol.Status{
 		Type:    protocol.TypeStatus,
 		State:   state,
 		LLMHash: hash,
+		GPUAvg:  avg,
 	})
+}
+
+// SetGPUAvg stores the rolling GPU baseline mean for inclusion in status messages.
+// Call this periodically (e.g., every minute) from the GPU monitor stats.
+func (c *Connection) SetGPUAvg(avg int) {
+	c.mu.Lock()
+	c.gpuAvg = avg
+	c.mu.Unlock()
+}
+
+// GetGPUAvg returns the baseline mean last reported to the manager (0 = not yet reported).
+func (c *Connection) GetGPUAvg() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gpuAvg
 }
 
 // SetLLMHash updates the connection's LLM hash (thread-safe).

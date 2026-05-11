@@ -9,17 +9,15 @@ import (
 
 	"fyne.io/systray"
 	"github.com/rs/zerolog/log"
-	"github.com/ylallemant/synergia/internal/client/gpu"
+	"github.com/ylallemant/synergia/internal/client/status"
 )
 
-// StatusProvider gives the tray access to current worker state.
+// StatusProvider gives the tray access to error details for tooltip text.
+// The tray no longer drives its own status computation — it reacts to
+// status.ChangeHandler calls fired by status.Provider.Run.
 type StatusProvider interface {
-	IsConnected() bool
-	GPUState() gpu.State
-	GPUSupported() (bool, string)
 	LLMReachable() (bool, string)
-	Fingerprint() string
-	Model() string
+	GPUSupported() (bool, string)
 }
 
 // Tray manages the system tray icon and menu.
@@ -65,7 +63,7 @@ func (t *Tray) Quit() {
 
 func (t *Tray) onReady() {
 	systray.SetTitle("DT")
-	systray.SetTooltip("DeepThink Worker")
+	systray.SetTooltip("Synergia Worker")
 	t.setIcon(iconConnectedIdle)
 
 	mDash := systray.AddMenuItem("Open Dashboard", "Open the worker dashboard in your browser")
@@ -121,33 +119,35 @@ func (t *Tray) onExit() {
 	log.Info().Msg("system tray exiting")
 }
 
-// UpdateStatus refreshes the tray icon based on current state.
-func (t *Tray) UpdateStatus(connected bool, gpuState gpu.State, processing bool, paused bool) {
-	gpuSupported, gpuReason := t.status.GPUSupported()
-	llmReachable, llmError := t.status.LLMReachable()
+// UpdateStatus is a status.ChangeHandler — called by status.Provider.Run
+// whenever the computed status changes. It maps each status const to the
+// appropriate tray icon and tooltip.
+func (t *Tray) UpdateStatus(_, current string) {
+	_, llmError := t.status.LLMReachable()
+	_, gpuReason := t.status.GPUSupported()
 
-	switch {
-	case !connected:
+	switch current {
+	case status.StatusDisconnected:
 		t.setIcon(iconDisconnected)
-		systray.SetTooltip("DeepThink Worker — Disconnected")
-	case !llmReachable:
-		t.setIcon(iconReconnecting) // yellow — warning state
-		systray.SetTooltip("DeepThink Worker — LLM Unreachable: " + llmError)
-	case !gpuSupported:
-		t.setIcon(iconReconnecting) // yellow — warning state
-		systray.SetTooltip("DeepThink Worker — GPU Unsupported: " + gpuReason)
-	case paused:
+		systray.SetTooltip("Synergia Worker — Disconnected")
+	case status.StatusLLMUnreachable:
+		t.setIcon(iconReconnecting)
+		systray.SetTooltip("Synergia Worker — LLM Unreachable: " + llmError)
+	case status.StatusGPUUnsupported:
+		t.setIcon(iconReconnecting)
+		systray.SetTooltip("Synergia Worker — GPU Unsupported: " + gpuReason)
+	case status.StatusPaused:
 		t.setIcon(iconPaused)
-		systray.SetTooltip("DeepThink Worker — Paused")
-	case gpuState == gpu.StateIdle:
-		t.setIcon(iconReconnecting) // yellow — GPU busy
-		systray.SetTooltip("DeepThink Worker — GPU Busy (Idle)")
-	case processing:
+		systray.SetTooltip("Synergia Worker — Paused")
+	case status.StatusGPUBusy:
+		t.setIcon(iconReconnecting)
+		systray.SetTooltip("Synergia Worker — GPU Busy")
+	case status.StatusProcessing:
 		t.setIcon(iconProcessing)
-		systray.SetTooltip("DeepThink Worker — Processing")
-	default:
+		systray.SetTooltip("Synergia Worker — Processing")
+	default: // StatusReady
 		t.setIcon(iconConnectedIdle)
-		systray.SetTooltip("DeepThink Worker — Ready")
+		systray.SetTooltip("Synergia Worker — Ready")
 	}
 }
 

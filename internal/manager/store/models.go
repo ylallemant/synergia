@@ -24,8 +24,12 @@ type Worker struct {
 	TrustScore        int    `gorm:"default:0"`
 	TotalRequests     int64  `gorm:"default:0"`
 	TotalLatencyMs    int64  `gorm:"default:0"`
-	LastSeenAt        time.Time
-	Status            string `gorm:"default:offline;size:20"` // available, processing, updating, paused, idle, withdrawn, offline
+	// GPUAvg is the worker's reported rolling baseline GPU utilisation mean (bottom-85th-pct),
+	// excluding gaming/rendering peaks. Collected only when the worker has given consent.
+	// Used by the manager to tune contention thresholds per worker.
+	GPUAvg     int    `gorm:"default:0"`
+	LastSeenAt time.Time
+	Status     string `gorm:"default:offline;size:20"` // available, processing, updating, paused, idle, withdrawn, offline
 }
 
 // WorkUnit records a dispatched work unit and its outcome.

@@ -380,6 +380,13 @@ func (g *Gateway) readLoop(wc *workerConn) {
 				}
 				g.store.UpdateWorkerSyncStatus(wc.info.Fingerprint)
 			}
+			// Store GPU baseline avg only when the worker has given consent —
+			// we collect the aggregate (no timeline, no peaks), never raw load curves.
+			if statusMsg.GPUAvg > 0 && g.store != nil && g.store.HasConsent(wc.info.Fingerprint) {
+				if err := g.store.SetWorkerGPUAvg(wc.info.Fingerprint, statusMsg.GPUAvg); err != nil {
+					log.Error().Err(err).Msg("failed to update worker GPU avg")
+				}
+			}
 			if g.store != nil {
 				// Prevent workers with withdrawn consent from becoming available
 				if (statusMsg.State == "available" || statusMsg.State == "online") && !g.store.HasConsent(wc.info.Fingerprint) {

@@ -57,6 +57,9 @@ type DashboardStats struct {
 	ModelSynced    int64
 	ModelOutOfSync int64
 	DeletedWorkers int64
+	// AvgWorkerGPU is the mean GPU baseline reported by connected (non-offline) workers.
+	// 0 means no data yet. Used by admins to tune contention thresholds.
+	AvgWorkerGPU int
 	Roles              []RoleEntry
 }
 
@@ -192,6 +195,13 @@ func (c *Cache) refreshStats() {
 	// LLM model sync — independent of binary/backend version targets
 	db.Model(&store.Worker{}).Where("status NOT IN ? AND sync_status = ?", []string{"offline", "deleted"}, "synced").Count(&stats.ModelSynced)
 	db.Model(&store.Worker{}).Where("status NOT IN ? AND sync_status = ?", []string{"offline", "deleted"}, "out-of-sync").Count(&stats.ModelOutOfSync)
+
+	// Average GPU baseline across non-offline workers that have reported it.
+	var avgGPU float64
+	db.Model(&store.Worker{}).
+		Where("status NOT IN ? AND gpu_avg > 0", []string{"offline", "deleted"}).
+		Select("AVG(gpu_avg)").Scan(&avgGPU)
+	stats.AvgWorkerGPU = int(avgGPU)
 
 	// Workers by role
 	type roleRow struct {

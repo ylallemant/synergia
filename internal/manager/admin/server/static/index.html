@@ -77,6 +77,12 @@
   <div class="card"><div class="label">Out of Sync</div><div class="value yellow">{{.ModelOutOfSync}}</div></div>
 </div>
 
+<h2>GPU Baseline</h2>
+<p class="section-hint">Rolling average GPU utilisation reported by active workers (bottom-85th-percentile, peaks excluded). Use this to tune contention thresholds. Only collected from consented workers — no load curves, no timestamps.</p>
+<div class="grid">
+  <div class="card"><div class="label">Avg Worker GPU</div><div class="value">{{if .AvgWorkerGPU}}{{.AvgWorkerGPU}} %{{else}}—{{end}}</div></div>
+</div>
+
 <h2>Recent Client Errors (last 10)</h2>
 {{if .Errors}}
 <table>

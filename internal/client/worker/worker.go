@@ -17,8 +17,8 @@ import (
 	"github.com/ylallemant/synergia/internal/client/gpu"
 	"github.com/ylallemant/synergia/internal/client/identity"
 	"github.com/ylallemant/synergia/internal/client/llm"
-	"github.com/ylallemant/synergia/internal/protocol"
 	"github.com/ylallemant/synergia/internal/client/updater"
+	"github.com/ylallemant/synergia/internal/protocol"
 )
 
 // Trigger payloads for testing error reporting.
@@ -156,6 +156,7 @@ func (w *Worker) process(ctx context.Context, wu *protocol.WorkUnit) {
 				Error: errMsg,
 			})
 			w.processing.SetProcessing(false)
+			w.monitor.SetProcessing(false)
 			_ = w.conn.SendStatus("available")
 		}
 	}()
@@ -183,7 +184,7 @@ func (w *Worker) process(ctx context.Context, wu *protocol.WorkUnit) {
 	}
 
 	// Check GPU state — if idle, reject work
-	if w.monitor.GetState() == gpu.StateIdle {
+	if w.monitor.GetState() == gpu.StateBusy {
 		log.Warn().Str("id", wu.ID).Msg("rejecting work unit — GPU contention active")
 		_ = w.conn.Send(&protocol.Error{
 			Type:  protocol.TypeError,
@@ -194,6 +195,7 @@ func (w *Worker) process(ctx context.Context, wu *protocol.WorkUnit) {
 	}
 
 	w.processing.SetProcessing(true)
+	w.monitor.SetProcessing(true)
 	_ = w.conn.SendStatus("processing")
 
 	log.Info().Str("id", wu.ID).Str("model", wu.Model).Msg("processing work unit")
@@ -228,6 +230,7 @@ func (w *Worker) process(ctx context.Context, wu *protocol.WorkUnit) {
 			}
 			_ = w.conn.Send(result)
 			w.processing.SetProcessing(false)
+			w.monitor.SetProcessing(false)
 			return
 		case TriggerPanic:
 			log.Warn().Str("id", wu.ID).Msg("trigger payload detected: PANIC")
@@ -244,6 +247,7 @@ func (w *Worker) process(ctx context.Context, wu *protocol.WorkUnit) {
 				Error: errMsg,
 			})
 			w.processing.SetProcessing(false)
+			w.monitor.SetProcessing(false)
 			_ = w.conn.SendStatus("available")
 			return
 		}
@@ -264,6 +268,7 @@ func (w *Worker) process(ctx context.Context, wu *protocol.WorkUnit) {
 			Error: err.Error(),
 		})
 		w.processing.SetProcessing(false)
+		w.monitor.SetProcessing(false)
 		_ = w.conn.SendStatus("available")
 		return
 	}
@@ -289,6 +294,7 @@ func (w *Worker) process(ctx context.Context, wu *protocol.WorkUnit) {
 			w.reporter.Report(err)
 		}
 		w.processing.SetProcessing(false)
+		w.monitor.SetProcessing(false)
 		_ = w.conn.SendStatus("available")
 		return
 	}
@@ -297,7 +303,16 @@ func (w *Worker) process(ctx context.Context, wu *protocol.WorkUnit) {
 		w.counter.IncrementUnits()
 	}
 
+	// Wait for the GPU to cool back down to baseline before declaring the
+	// worker available again. This prevents the monitor from seeing residual
+	// inference heat on its next 5 s tick and falsely flagging it as external
+	// contention. Cap at 15 s: if the GPU is still hot then the user started
+	// something GPU-intensive during inference, so we report available anyway
+	// and let the monitor detect real contention on the next tick.
+	w.monitor.WaitForBaseline(ctx, 15*time.Second)
+
 	w.processing.SetProcessing(false)
+	w.monitor.SetProcessing(false)
 	_ = w.conn.SendStatus("available")
 
 	log.Info().Str("id", wu.ID).Int64("processing_time_ms", processingTime).Msg("work unit completed")

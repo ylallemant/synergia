@@ -45,6 +45,7 @@
             <ul>
                 <li><strong>Fingerprint</strong> — a unique cryptographic identity for this worker</li>
                 <li><strong>Hardware statistics</strong> — OS + version, GPU + VRAM + driver/version, CPU + core count, RAM</li>
+                <li><strong>GPU availability average</strong> — a rolling mean of idle GPU load (bottom-85th-percentile, peaks excluded) sent once per minute; no load curves, no timestamps, no activity inference</li>
                 <li><strong>Configuration preferences</strong> — model size limits, quantisation, preferred role</li>
                 <li><strong>Automatic updates</strong> — the client will download backend binaries (e.g. llama-server) and self-update when instructed by the cluster manager</li>
             </ul>
@@ -79,6 +80,7 @@
             <ul>
                 <li><strong>Fingerprint</strong> — a unique cryptographic identity for this worker</li>
                 <li><strong>Hardware statistics</strong> — OS + version, GPU + VRAM + driver/version, CPU + core count, RAM</li>
+                <li><strong>GPU availability average</strong> — a rolling mean of idle GPU load (bottom-85th-percentile, peaks excluded) sent once per minute; no load curves, no timestamps, no activity inference</li>
                 <li><strong>Configuration preferences</strong> — model size limits, quantisation, preferred role</li>
                 <li><strong>Automatic updates</strong> — the client will download backend binaries (e.g. llama-server) and self-update when instructed by the cluster manager</li>
             </ul>
@@ -112,6 +114,9 @@
             <div class="stat"><span class="label">Uptime</span><span class="value" id="uptime">—</span></div>
             <div class="stat"><span class="label">Model</span><span class="value" id="model">—</span></div>
             <div class="stat"><span class="label">Quantisation</span><span class="value" id="quantisation">—</span></div>
+            <div class="stat"><span class="label">GPU Load</span><span class="value" id="gpu-load">—</span></div>
+            <div class="stat"><span class="label">GPU Baseline (rolling)</span><span class="value" id="gpu-baseline-stat" title="Peak-excluded rolling mean — what gets reported to the manager once 60 samples are collected">—</span></div>
+            <div class="stat"><span class="label">GPU → Manager</span><span class="value" id="gpu-sent" title="Last value reported to the manager (updated every 60 s, requires 5 min of data)">—</span></div>
         </div>
 
         <!-- Configuration (only visible when consented) -->
@@ -146,6 +151,8 @@
             <div class="stat"><span class="label">CPU</span><span class="value" id="hw-cpu">—</span></div>
             <div class="stat"><span class="label">RAM</span><span class="value" id="hw-ram">—</span></div>
             <div class="stat"><span class="label">GPU State</span><span class="value" id="gpu-state">—</span></div>
+            <div class="stat"><span class="label">GPU Avg (15 min)</span><span class="value" id="gpu-mean">—</span></div>
+            <div class="stat"><span class="label">GPU Baseline</span><span class="value" id="gpu-baseline" title="Rolling mean excluding top-15% peaks — used for contention threshold tuning">—</span></div>
         </div>
 
         <div class="card">
@@ -262,61 +269,66 @@
             }
         }
 
+        // applyStatus updates the entire UI from a status payload object.
+        // Called by both the SSE handler (on change) and the polling fallback.
+        function applyStatus(data) {
+            document.getElementById('model').textContent = data.model || '—';
+            document.getElementById('quantisation').textContent = data.quantisation || '—';
+            document.getElementById('gpu-state').textContent = data.gpu_state || '—';
+            document.getElementById('units').textContent = data.units_processed;
+            document.getElementById('uptime').textContent = formatUptime(data.uptime_seconds);
+            document.getElementById('fingerprint').textContent = data.fingerprint || '—';
+
+            if (data.hardware) {
+                const hw = data.hardware;
+                document.getElementById('hw-os').textContent = hw.os + ' ' + (hw.os_version || '');
+                document.getElementById('hw-gpu').textContent = hw.gpu || '—';
+                const driverParts = [hw.gpu_driver, hw.gpu_driver_version].filter(Boolean);
+                document.getElementById('hw-gpu-driver').textContent = driverParts.length ? driverParts.join(' ') : '—';
+                document.getElementById('hw-vram').textContent = hw.vram_mb ? (hw.vram_mb >= 1024 ? (hw.vram_mb / 1024).toFixed(1) + ' GB' : hw.vram_mb + ' MB') : '—';
+                document.getElementById('hw-cpu').textContent = (hw.cpu || '—') + ' (' + hw.cpu_cores + ' cores)';
+                document.getElementById('hw-ram').textContent = hw.ram_mb ? (hw.ram_mb >= 1024 ? (hw.ram_mb / 1024).toFixed(1) + ' GB' : hw.ram_mb + ' MB') : '—';
+            }
+
+            const dot  = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+            if (!data.connected) {
+                dot.className = 'status-dot dot-red';
+                text.textContent = 'Disconnected';
+            } else if (!data.consent || !data.consent.accepted) {
+                dot.className = 'status-dot dot-grey';
+                text.textContent = 'Connected — Unavailable';
+            } else if (!data.llm_reachable) {
+                dot.className = 'status-dot dot-yellow';
+                text.textContent = 'Connected — LLM Unreachable';
+            } else if (data.paused) {
+                dot.className = 'status-dot dot-grey';
+                text.textContent = 'Connected — Paused';
+            } else if (data.processing) {
+                dot.className = 'status-dot dot-blue';
+                text.textContent = 'Connected — Processing';
+            } else if (data.gpu_state === 'busy') {
+                dot.className = 'status-dot dot-yellow';
+                text.textContent = 'Connected — GPU Busy';
+            } else {
+                dot.className = 'status-dot dot-green';
+                text.textContent = 'Connected — Ready';
+            }
+
+            updateConsentUI(data.consent);
+            if (data.config) updateConfigForm(data.config);
+        }
+
         async function refresh() {
             try {
                 const resp = await fetch('/api/status');
                 const data = await resp.json();
-
-                document.getElementById('model').textContent = data.model || '—';
-                document.getElementById('quantisation').textContent = data.quantisation || '—';
-                document.getElementById('gpu-state').textContent = data.gpu_state || '—';
-                document.getElementById('units').textContent = data.units_processed;
-                document.getElementById('uptime').textContent = formatUptime(data.uptime_seconds);
-                document.getElementById('fingerprint').textContent = data.fingerprint || '—';
-
-                // Hardware info
-                if (data.hardware) {
-                    const hw = data.hardware;
-                    document.getElementById('hw-os').textContent = hw.os + ' ' + (hw.os_version || '');
-                    document.getElementById('hw-gpu').textContent = hw.gpu || '—';
-                    const driverParts = [hw.gpu_driver, hw.gpu_driver_version].filter(Boolean);
-                    document.getElementById('hw-gpu-driver').textContent = driverParts.length ? driverParts.join(' ') : '—';
-                    document.getElementById('hw-vram').textContent = hw.vram_mb ? (hw.vram_mb >= 1024 ? (hw.vram_mb / 1024).toFixed(1) + ' GB' : hw.vram_mb + ' MB') : '—';
-                    document.getElementById('hw-cpu').textContent = (hw.cpu || '—') + ' (' + hw.cpu_cores + ' cores)';
-                    document.getElementById('hw-ram').textContent = hw.ram_mb ? (hw.ram_mb >= 1024 ? (hw.ram_mb / 1024).toFixed(1) + ' GB' : hw.ram_mb + ' MB') : '—';
-                }
-
-                const dot = document.getElementById('status-dot');
-                const text = document.getElementById('status-text');
-
-                if (!data.connected) {
-                    dot.className = 'status-dot dot-red';
-                    text.textContent = 'Disconnected';
-                } else if (!data.consent || !data.consent.accepted) {
-                    dot.className = 'status-dot dot-grey';
-                    text.textContent = 'Connected — Unavailable';
-                } else if (data.paused) {
-                    dot.className = 'status-dot dot-grey';
-                    text.textContent = 'Connected — Paused';
-                } else if (data.processing) {
-                    dot.className = 'status-dot dot-blue';
-                    text.textContent = 'Connected — Processing';
-                } else if (data.gpu_state === 'idle') {
-                    dot.className = 'status-dot dot-yellow';
-                    text.textContent = 'Connected — GPU Busy (Idle)';
-                } else {
-                    dot.className = 'status-dot dot-green';
-                    text.textContent = 'Connected — Ready';
-                }
-
-                updateConsentUI(data.consent);
-
-                if (data.config) {
-                    updateConfigForm(data.config);
-                }
+                applyStatus(data);
             } catch (e) {
+                // fetch('/api/status') failed — the worker process is no longer
+                // reachable (shutdown, crash, or network loss).
                 document.getElementById('status-dot').className = 'status-dot dot-red';
-                document.getElementById('status-text').textContent = 'Error';
+                document.getElementById('status-text').textContent = 'Worker offline';
             }
         }
 
@@ -574,8 +586,54 @@
             }
         }
 
+        // Lightweight GPU poll — updates load bar every second without fetching full status.
+        async function refreshGPU() {
+            try {
+                const resp = await fetch('/api/gpu');
+                const data = await resp.json();
+                const pct = data.utilization ?? 0;
+                document.getElementById('gpu-load').textContent = pct + ' %';
+
+                if (data.stats && data.stats.sample_count > 0) {
+                    const n = data.stats.sample_count;
+                    document.getElementById('gpu-mean').textContent = data.stats.mean + ' %';
+                    document.getElementById('gpu-baseline').textContent = data.stats.baseline_mean + ' % (n=' + n + ')';
+                    // Statistics block: rolling baseline with sample count so the user
+                    // can see whether the window is still warming up (<60) or stable.
+                    const ready = n >= 60;
+                    document.getElementById('gpu-baseline-stat').textContent =
+                        data.stats.baseline_mean + ' %' + (ready ? '' : ' (warming up: ' + n + '/60)');
+                }
+
+                // Show the value last reported to the manager (0 = not yet sent).
+                const sent = data.sent_to_manager ?? 0;
+                document.getElementById('gpu-sent').textContent = sent > 0 ? sent + ' %' : '— (not yet reported)';
+            } catch { /* ignore transient errors */ }
+        }
+
+        // Event-driven status updates via SSE — no polling lag on state changes.
+        // The server pushes a full status snapshot whenever the computed status
+        // string changes (disconnected ↔ ready ↔ processing ↔ gpu_busy, etc.).
+        const statusEvents = new EventSource('/api/status-events');
+        statusEvents.onmessage = async e => {
+            try {
+                const data = JSON.parse(e.data);
+                // Re-use the same update path as the polling refresh.
+                applyStatus(data);
+            } catch { /* malformed event — ignore */ }
+        };
+        statusEvents.onerror = () => {
+            // EventSource auto-reconnects; keep the badge accurate via the
+            // fallback poll while the SSE stream is unavailable.
+        };
+
+        // Fallback + uptime/units heartbeat — keeps the clock and counters
+        // ticking even when no status change event fires.
         refresh();
-        setInterval(refresh, 3000);
+        setInterval(refresh, 5000);
+
+        refreshGPU();
+        setInterval(refreshGPU, 1000);
     </script>
 </body>
 </html>

@@ -202,13 +202,9 @@ func main() {
 		},
 	}
 
-	// Pre-flight: ensure required ports are free
+	// Pre-flight: kill any stale processes holding required ports.
 	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, "127.0.0.1:" + llamaServerPort, "127.0.0.1:9876"} {
-		if ln, err := net.Listen("tcp", addr); err != nil {
-			fatal("port %s is already in use — kill the previous process first", addr)
-		} else {
-			ln.Close()
-		}
+		freePort(addr)
 	}
 
 	// --- Step 1: Download models if needed ---
@@ -386,11 +382,7 @@ func main() {
 
 		// Pre-flight: ensure TOFU test ports are free
 		for _, addr := range []string{tofuManagerAddr, tofuManagerAdminAddr} {
-			if ln, err := net.Listen("tcp", addr); err != nil {
-				fatal("TOFU test port %s is already in use", addr)
-			} else {
-				ln.Close()
-			}
+			freePort(addr)
 		}
 
 		tofuManagerLogs := newLogBuffer("tofu-manager", logDir)
@@ -1765,6 +1757,65 @@ func fatal(format string, args ...any) {
 	os.Exit(1)
 }
 
+// freePort ensures addr ("host:port") is available, killing any stale process
+// that holds it. Tries SIGTERM first, then SIGKILL after 3 s, then fatal.
+func freePort(addr string) {
+	if ln, err := net.Listen("tcp", addr); err == nil {
+		ln.Close()
+		return // already free
+	}
+
+	_, portStr, _ := net.SplitHostPort(addr)
+	log.Warn().Str("addr", addr).Msg("port in use — killing stale process")
+
+	// Find and signal all PIDs holding the port.
+	out, err := exec.Command("lsof", "-ti", ":"+portStr).Output()
+	if err == nil {
+		for pidStr := range strings.FieldsSeq(string(out)) {
+			pid, err := strconv.Atoi(strings.TrimSpace(pidStr))
+			if err != nil {
+				continue
+			}
+			p, err := os.FindProcess(pid)
+			if err != nil {
+				continue
+			}
+			log.Warn().Int("pid", pid).Str("addr", addr).Msg("sending SIGTERM to stale process")
+			p.Signal(syscall.SIGTERM)
+		}
+	}
+
+	// Wait up to 3 s for SIGTERM to take effect.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		if ln, err := net.Listen("tcp", addr); err == nil {
+			ln.Close()
+			log.Info().Str("addr", addr).Msg("port now free")
+			return
+		}
+	}
+
+	// SIGTERM wasn't enough — escalate to SIGKILL.
+	if out, err := exec.Command("lsof", "-ti", ":"+portStr).Output(); err == nil {
+		for pidStr := range strings.FieldsSeq(string(out)) {
+			pid, _ := strconv.Atoi(strings.TrimSpace(pidStr))
+			if p, err := os.FindProcess(pid); err == nil {
+				log.Warn().Int("pid", pid).Str("addr", addr).Msg("sending SIGKILL to stale process")
+				p.Kill()
+			}
+		}
+	}
+	time.Sleep(500 * time.Millisecond)
+	if ln, err := net.Listen("tcp", addr); err == nil {
+		ln.Close()
+		log.Info().Str("addr", addr).Msg("port now free after SIGKILL")
+		return
+	}
+
+	fatal("port %s is still in use after SIGKILL — give up", addr)
+}
+
 // querySQLiteCount runs a SQL query that returns a single integer count via the sqlite3 CLI.
 func querySQLiteCount(dbPath, query string) int {
 	cmd := exec.Command("sqlite3", dbPath, query)
@@ -1827,6 +1878,11 @@ func runServices() {
 	}
 
 	cleanupOldRuns(filepath.Join(testDir, "runs"), 3)
+
+	// Pre-flight: kill any stale processes holding required ports.
+	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, "127.0.0.1:" + llamaServerPort, "127.0.0.1:9876"} {
+		freePort(addr)
+	}
 
 	// TLS certs
 	tlsDir := filepath.Join(testDir, "testdata", "tls")

@@ -260,6 +260,7 @@ func (s *Server) collectData() dashboardData {
 	data.BackendOutdated = stats.BackendOutdated
 	data.ModelSynced = stats.ModelSynced
 	data.ModelOutOfSync = stats.ModelOutOfSync
+	data.AvgWorkerGPU = stats.AvgWorkerGPU
 
 	for _, r := range stats.Roles {
 		data.Roles = append(data.Roles, roleEntry{
@@ -309,6 +310,7 @@ type dashboardData struct {
 	BackendOutdated    int64
 	ModelSynced        int64
 	ModelOutOfSync     int64
+	AvgWorkerGPU       int
 	Roles              []roleEntry
 	GeneratedAt        string
 }

@@ -112,7 +112,7 @@ func (s *Store) SetWorkerDeleted(fingerprint string) error {
 		Update("status", "deleted").Error
 }
 
-// SetWorkerStatus updates the worker's status (e.g., "available", "idle", "processing").
+// SetWorkerStatus updates the worker's status (e.g., "available", "busy", "processing").
 func (s *Store) SetWorkerStatus(fingerprint, status string) error {
 	return s.DB.Model(&Worker{}).
 		Where("fingerprint = ?", fingerprint).
@@ -120,7 +120,7 @@ func (s *Store) SetWorkerStatus(fingerprint, status string) error {
 }
 
 // SetWorkerAvailableIfProcessing sets the worker to "available" only if currently "processing".
-// This avoids overwriting intentional states like "paused" or "idle".
+// This avoids overwriting intentional states like "paused" or "busy".
 func (s *Store) SetWorkerAvailableIfProcessing(fingerprint string) {
 	s.DB.Model(&Worker{}).
 		Where("fingerprint = ? AND status = ?", fingerprint, "processing").
@@ -684,6 +684,14 @@ func (s *Store) SetWorkerLLMHash(fingerprint, llmHash string) error {
 	return s.DB.Model(&Worker{}).
 		Where("fingerprint = ?", fingerprint).
 		Update("llm_hash", llmHash).Error
+}
+
+// SetWorkerGPUAvg stores the worker's rolling GPU baseline mean.
+// Only called when the worker has given data-collection consent.
+func (s *Store) SetWorkerGPUAvg(fingerprint string, avg int) error {
+	return s.DB.Model(&Worker{}).
+		Where("fingerprint = ?", fingerprint).
+		Update("gpu_avg", avg).Error
 }
 
 // UpdateWorkerSyncStatus recomputes the worker's sync_status by comparing its llm_hash

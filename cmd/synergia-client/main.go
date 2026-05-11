@@ -33,7 +33,9 @@ import (
 	"github.com/ylallemant/synergia/internal/client/identity"
 	"github.com/ylallemant/synergia/internal/client/llm"
 	"github.com/ylallemant/synergia/internal/protocol"
+	"github.com/ylallemant/synergia/internal/client/probe"
 	"github.com/ylallemant/synergia/internal/client/server"
+	"github.com/ylallemant/synergia/internal/client/state"
 	"github.com/ylallemant/synergia/internal/client/status"
 	"github.com/ylallemant/synergia/internal/client/tray"
 	"github.com/ylallemant/synergia/internal/client/updater"
@@ -209,8 +211,9 @@ func main() {
 	brandingMgr := branding.New(cfg.DataDir, managerHTTPURL, cfg.WorkerKey)
 	autostartMgr := autostart.New(execPath(), os.Args[1:])
 	reporter := errorreporter.New(managerHTTPURL, cfg.WorkerKey, id.Fingerprint, version.Version)
-	sp := status.New(conn, monitor, llmClient, id, cfg.Model, cfg.Quantisation)
-	w := worker.New(conn, llmClient, id, monitor, sp, sp, sp, reporter, consentMgr)
+	st := state.New(id.Fingerprint, cfg.Model, cfg.Quantisation)
+	sp := status.New(st)
+	w := worker.New(conn, llmClient, id, monitor, st, st, st, reporter, consentMgr)
 	w.SetModelDownloadConfig(cfg.Role, filepath.Dir(cfg.ModelFile), managerHTTPURL, cfg.WorkerKey)
 
 	// Configure binary auto-updater
@@ -292,11 +295,52 @@ func main() {
 	// Start GPU monitor
 	go monitor.Run(ctx)
 
-	// Start LLM health monitor (check every 10s)
-	go llmClient.MonitorHealth(ctx, 10*time.Second)
+	// Start all probe goroutines — each writes to the central state at its own
+	// interval so the status endpoint never does I/O at request time.
+	probe.RunAll(ctx, st, conn, monitor, llmClient)
 
 	// Start WebSocket connection (reconnects automatically)
 	go conn.Run(ctx)
+
+	// Keep the connection's GPU avg field current so every status message carries
+	// the latest rolling baseline. Only meaningful once we have enough samples.
+	go func() {
+		select {
+		case <-conn.Connected():
+		case <-ctx.Done():
+			return
+		}
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				stats := monitor.Stats()
+				conn.SetGPUAvg(stats.BaselineMean)
+				// Once the window has at least 5 minutes of data (60 samples at 5 s),
+				// replace the startup-calibrated baseline with the rolling peak-excluded
+				// mean so contention detection adapts to the machine's real idle load.
+				if stats.SampleCount >= 60 {
+					monitor.SetBaseline(stats.BaselineMean)
+				}
+			}
+		}
+	}()
+
+	// Send initial "available" status once the first WebSocket connection is up.
+	// Without this the manager DB status stays "online" (set on handshake) and
+	// AggregatedStatus("online", ...) → "unavailable" until the first GPU state
+	// change or work unit completes — which may never happen at idle.
+	go func() {
+		select {
+		case <-conn.Connected():
+		case <-ctx.Done():
+			return
+		}
+		_ = conn.SendStatus("available")
+	}()
 
 	// Start dashboard server
 	go srv.Run(ctx)
@@ -307,19 +351,11 @@ func main() {
 	// Nightly restart at 3 AM when idle — keeps log file size bounded
 	go scheduledRestart(ctx, sp)
 
-	// Periodically update the system tray icon with current state
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				t.UpdateStatus(sp.IsConnected(), sp.GPUState(), sp.IsProcessing(), sp.IsPaused())
-			}
-		}
-	}()
+	// Register status change handlers, then start the status loop.
+	// status.Provider.Run fires handlers only when the computed status changes.
+	sp.AddHandler(srv.BroadcastStatus) // pushes to open /api/status-events SSE connections
+	sp.AddHandler(t.UpdateStatus)      // updates the tray icon immediately
+	go sp.Run(ctx)
 
 	// Handle tray quit signal and SIGINT/SIGTERM → tray shutdown.
 	// systray.Run() owns the main goroutine on macOS; it only returns after
@@ -341,11 +377,11 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-t.PauseCh():
-				sp.SetPaused(true)
+				st.SetPaused(true)
 				log.Info().Msg("worker paused by user")
 				_ = conn.SendStatus("paused")
 			case <-t.ResumeCh():
-				sp.SetPaused(false)
+				st.SetPaused(false)
 				log.Info().Msg("worker resumed by user")
 				_ = conn.SendStatus("available")
 			}
@@ -375,8 +411,9 @@ func runUnconfigured(cfg *config.Config, logBuf *logbuffer.Buffer, logFilePath s
 		log.Fatal().Err(err).Msg("identity error")
 	}
 
-	// Minimal status provider, consent, config, branding, autostart
-	sp := status.New(nil, nil, nil, id, "", "")
+	// Minimal state/status for unconfigured mode — no probes needed.
+	st := state.New(id.Fingerprint, "", "")
+	sp := status.New(st)
 	consentMgr := consent.New(cfg.DataDir, "", "", id.Fingerprint, false)
 	configMgr := workerconfig.New(cfg.DataDir, "", "", id.Fingerprint)
 	brandingMgr := branding.New(cfg.DataDir, "", "")
