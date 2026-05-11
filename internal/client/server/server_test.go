@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"os"
+
 	"github.com/rs/zerolog"
 	"github.com/ylallemant/synergia/internal/client/consent"
 	"github.com/ylallemant/synergia/internal/client/gpu"
@@ -364,6 +366,347 @@ func TestHandleStatusEvents_WrongMethod_Returns405(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/status-events", nil)
 	rec := httptest.NewRecorder()
 	s.handleStatusEvents(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("want 405, got %d", rec.Code)
+	}
+}
+
+// ── handleStatus ──────────────────────────────────────────────────────────────
+
+func TestHandleStatus_GET_ReturnsValidJSON(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rec := httptest.NewRecorder()
+	s.handleStatus(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	var m map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&m); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	for _, field := range []string{"connected", "processing", "gpu_state", "llm_reachable", "model"} {
+		if _, ok := m[field]; !ok {
+			t.Errorf("missing field %q in status response", field)
+		}
+	}
+}
+
+func TestHandleStatus_POST_Returns405(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/status", nil)
+	rec := httptest.NewRecorder()
+	s.handleStatus(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("want 405, got %d", rec.Code)
+	}
+}
+
+// ── handleHealth ──────────────────────────────────────────────────────────────
+
+func TestHandleHealth_ReturnsOK(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	rec := httptest.NewRecorder()
+	s.handleHealth(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	var m map[string]string
+	json.NewDecoder(rec.Body).Decode(&m)
+	if m["status"] != "ok" {
+		t.Errorf("want status=ok, got %q", m["status"])
+	}
+}
+
+// ── handleGPU ─────────────────────────────────────────────────────────────────
+
+func TestHandleGPU_GET_ReturnsValidJSON(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/gpu", nil)
+	rec := httptest.NewRecorder()
+	s.handleGPU(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	var m map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&m); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	for _, field := range []string{"utilization", "state", "sent_to_manager", "stats"} {
+		if _, ok := m[field]; !ok {
+			t.Errorf("missing field %q in gpu response", field)
+		}
+	}
+}
+
+func TestHandleGPU_StateString_IsAvailable(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/gpu", nil)
+	rec := httptest.NewRecorder()
+	s.handleGPU(rec, req)
+
+	var m map[string]any
+	json.NewDecoder(rec.Body).Decode(&m)
+	if m["state"] != "available" {
+		t.Errorf("want state=available (stub returns StateAvailable), got %q", m["state"])
+	}
+}
+
+func TestHandleGPU_POST_Returns405(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/gpu", nil)
+	rec := httptest.NewRecorder()
+	s.handleGPU(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("want 405, got %d", rec.Code)
+	}
+}
+
+// ── handleConsent ─────────────────────────────────────────────────────────────
+
+func TestHandleConsent_GET_ReturnsState(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/consent", nil)
+	rec := httptest.NewRecorder()
+	s.handleConsent(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	var m map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&m); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if _, ok := m["accepted"]; !ok {
+		t.Error("response missing 'accepted' field")
+	}
+}
+
+func TestHandleConsent_POST_Accept_Returns200(t *testing.T) {
+	s := newTestServerFull(t)
+	body := strings.NewReader(`{"accepted":true,"hardware_stats":true,"config_preferences":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/consent", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.handleConsent(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	var m map[string]string
+	json.NewDecoder(rec.Body).Decode(&m)
+	if m["status"] != "ok" {
+		t.Errorf("want status=ok, got %q", m["status"])
+	}
+}
+
+func TestHandleConsent_POST_InvalidJSON_Returns400(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/consent", strings.NewReader(`not json`))
+	rec := httptest.NewRecorder()
+	s.handleConsent(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("want 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleConsent_OPTIONS_Returns200(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodOptions, "/api/consent", nil)
+	rec := httptest.NewRecorder()
+	s.handleConsent(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("want 200 for OPTIONS, got %d", rec.Code)
+	}
+}
+
+func TestHandleConsent_DELETE_Returns405(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodDelete, "/api/consent", nil)
+	rec := httptest.NewRecorder()
+	s.handleConsent(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("want 405, got %d", rec.Code)
+	}
+}
+
+// ── handleConfig ──────────────────────────────────────────────────────────────
+
+func TestHandleConfig_GET_ReturnsConfig(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	rec := httptest.NewRecorder()
+	s.handleConfig(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	var m map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&m); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+}
+
+func TestHandleConfig_POST_WithoutConsent_Returns403(t *testing.T) {
+	s := newTestServerFull(t)
+	// Consent not accepted — config POST must be forbidden.
+	body := strings.NewReader(`{"preferred_role":"tester","nickname":""}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/config", body)
+	rec := httptest.NewRecorder()
+	s.handleConfig(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("want 403 without consent, got %d", rec.Code)
+	}
+}
+
+func TestHandleConfig_POST_InvalidJSON_Returns400(t *testing.T) {
+	s := newTestServerFull(t)
+	// Accept consent first so the method check is skipped.
+	s.consent.Accept(true, true) //nolint:errcheck
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`not json`))
+	rec := httptest.NewRecorder()
+	s.handleConfig(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("want 400 for invalid JSON, got %d", rec.Code)
+	}
+}
+
+// ── handleHardwareInfo ────────────────────────────────────────────────────────
+
+func TestHandleHardwareInfo_GET_ReturnsPayload(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/hardware-info", nil)
+	rec := httptest.NewRecorder()
+	s.handleHardwareInfo(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	var m map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&m); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	for _, field := range []string{"fingerprint", "hardware", "config"} {
+		if _, ok := m[field]; !ok {
+			t.Errorf("missing field %q in hardware-info response", field)
+		}
+	}
+}
+
+func TestHandleHardwareInfo_POST_Returns405(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/hardware-info", nil)
+	rec := httptest.NewRecorder()
+	s.handleHardwareInfo(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("want 405, got %d", rec.Code)
+	}
+}
+
+// ── handleManagerURL ─────────────────────────────────────────────────────────
+
+func TestHandleManagerURL_POST_CallsCallback(t *testing.T) {
+	s := newTestServerFull(t)
+	var captured string
+	s.onManagerURLSet = func(url string) { captured = url }
+
+	body := strings.NewReader(`{"url":"wss://cluster.example.com/ws/worker"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/manager-url", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.handleManagerURL(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	if captured != "wss://cluster.example.com/ws/worker" {
+		t.Errorf("callback not called with correct URL, got %q", captured)
+	}
+}
+
+func TestHandleManagerURL_POST_EmptyURL_Returns400(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/manager-url", strings.NewReader(`{"url":""}`))
+	rec := httptest.NewRecorder()
+	s.handleManagerURL(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("want 400 for empty URL, got %d", rec.Code)
+	}
+}
+
+func TestHandleManagerURL_POST_InvalidJSON_Returns400(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/manager-url", strings.NewReader(`not json`))
+	rec := httptest.NewRecorder()
+	s.handleManagerURL(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("want 400 for invalid JSON, got %d", rec.Code)
+	}
+}
+
+func TestHandleManagerURL_GET_Returns405(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/manager-url", nil)
+	rec := httptest.NewRecorder()
+	s.handleManagerURL(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("want 405, got %d", rec.Code)
+	}
+}
+
+func TestHandleManagerURL_OPTIONS_Returns200(t *testing.T) {
+	s := newTestServerFull(t)
+	req := httptest.NewRequest(http.MethodOptions, "/api/manager-url", nil)
+	rec := httptest.NewRecorder()
+	s.handleManagerURL(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("want 200 for OPTIONS, got %d", rec.Code)
+	}
+}
+
+// ── handleLogsFile ────────────────────────────────────────────────────────────
+
+func TestHandleLogsFile_NoPath_Returns404(t *testing.T) {
+	s := newTestServer(t)
+	// logFilePath is empty — no log file configured.
+	req := httptest.NewRequest(http.MethodGet, "/api/logs-file", nil)
+	rec := httptest.NewRecorder()
+	s.handleLogsFile(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("want 404 when no log file, got %d", rec.Code)
+	}
+}
+
+func TestHandleLogsFile_WithFile_ServesContent(t *testing.T) {
+	s := newTestServer(t)
+	// Write a temporary log file.
+	logPath := strings.Join([]string{t.TempDir(), "test.log"}, "/")
+	if err := os.WriteFile(logPath, []byte(`{"level":"info","msg":"test"}`), 0644); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+	s.logFilePath = logPath
+
+	req := httptest.NewRequest(http.MethodGet, "/api/logs-file", nil)
+	rec := httptest.NewRecorder()
+	s.handleLogsFile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"msg":"test"`) {
+		t.Errorf("log content not served: %q", rec.Body.String())
+	}
+}
+
+func TestHandleLogsFile_POST_Returns405(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/logs-file", nil)
+	rec := httptest.NewRecorder()
+	s.handleLogsFile(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("want 405, got %d", rec.Code)
 	}
