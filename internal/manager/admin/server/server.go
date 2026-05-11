@@ -3,12 +3,19 @@ package server
 import (
 	"context"
 	"embed"
+	"encoding/json"
+	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/ylallemant/synergia/internal/logbuffer"
 	"github.com/ylallemant/synergia/internal/manager/acme"
 	"github.com/ylallemant/synergia/internal/manager/admin/auth"
 	"github.com/ylallemant/synergia/internal/manager/cache"
@@ -22,6 +29,7 @@ var dashboardTmpl = template.Must(template.ParseFS(staticFS, "static/index.html"
 var oidcTmpl = template.Must(template.ParseFS(staticFS, "static/oidc.html"))
 var workersTmpl = template.Must(template.ParseFS(staticFS, "static/workers.html"))
 var inferenceTmpl = template.Must(template.ParseFS(staticFS, "static/inference.html"))
+var logsTmpl = template.Must(template.ParseFS(staticFS, "static/logs.html"))
 
 // Server serves the admin dashboard and additional admin API routes.
 type Server struct {
@@ -36,6 +44,8 @@ type Server struct {
 	auth           *auth.Auth
 	mux            *http.ServeMux
 	server         *http.Server
+	logBuf         *logbuffer.Buffer
+	logFilePath    string
 }
 
 // New creates a new admin dashboard server.
@@ -77,8 +87,22 @@ func New(addr, apiKey, managerVersion string, s *store.Store, c *cache.Cache, in
 	srv.mux.HandleFunc("/admin/workers", srv.auth.RequireAuth(srv.workersHandler))
 	srv.mux.HandleFunc("/admin/inference", srv.auth.RequireAuth(srv.inferenceHandler))
 	srv.mux.HandleFunc("/admin/oidc", srv.auth.RequireAuth(srv.oidcHandler))
+	srv.mux.HandleFunc("/admin/logs", srv.auth.RequireAuth(srv.logsHandler))
+
+	// Log streaming APIs
+	srv.mux.HandleFunc("/api/manager/logs", srv.auth.RequireAuth(srv.handleManagerLogs))
+	srv.mux.HandleFunc("/api/manager/log-level", srv.auth.RequireAuth(srv.handleManagerLogLevel))
+	srv.mux.HandleFunc("/api/manager/logs-file", srv.auth.RequireAuth(srv.handleManagerLogsFile))
 
 	return srv
+}
+
+// SetLogBuffer wires the ring-buffer and optional log file path into the server.
+// Call this after New() and before Run(). Safe to skip — the Logs page will
+// simply show no entries if not called.
+func (s *Server) SetLogBuffer(buf *logbuffer.Buffer, filePath string) {
+	s.logBuf = buf
+	s.logFilePath = filePath
 }
 
 // HandleFunc registers an additional handler on the admin mux.
@@ -317,4 +341,126 @@ type errorEntry struct {
 	Version     string
 	Error       string
 	ReportedAt  string
+}
+
+// logsHandler serves GET /admin/logs — the manager log viewer page.
+func (s *Server) logsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := logsTmpl.Execute(w, pageData{APIKey: s.apiKey, ManagerVersion: s.managerVersion}); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
+}
+
+// handleManagerLogs streams manager log entries via Server-Sent Events.
+// On connect it replays the ring buffer, then pushes new lines in real time.
+func (s *Server) handleManagerLogs(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	// Clear the server's write deadline so the long-lived SSE connection is not
+	// killed by the 30s WriteTimeout set on the http.Server.
+	if rc := http.NewResponseController(w); rc != nil {
+		_ = rc.SetWriteDeadline(time.Time{})
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	if s.logBuf == nil {
+		flusher.Flush()
+		<-r.Context().Done()
+		return
+	}
+
+	for _, entry := range s.logBuf.GetAll() {
+		fmt.Fprintf(w, "data: %s\n\n", entry)
+	}
+	flusher.Flush()
+
+	id, ch := s.logBuf.Subscribe()
+	defer s.logBuf.Unsubscribe(id)
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case line, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", line)
+			flusher.Flush()
+		}
+	}
+}
+
+// handleManagerLogLevel gets or sets the zerolog global log level at runtime.
+// GET  → {"level":"info"}
+// POST → {"level":"debug"}  — takes effect immediately, no restart needed.
+func (s *Server) handleManagerLogLevel(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case http.MethodGet:
+		json.NewEncoder(w).Encode(map[string]string{"level": zerolog.GlobalLevel().String()}) //nolint:errcheck
+	case http.MethodPost:
+		var req struct {
+			Level string `json:"level"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		lvl, err := zerolog.ParseLevel(strings.ToLower(req.Level))
+		if err != nil {
+			http.Error(w, "unknown level: "+req.Level, http.StatusBadRequest)
+			return
+		}
+		zerolog.SetGlobalLevel(lvl)
+		log.Info().Str("level", lvl.String()).Msg("log level changed")
+		json.NewEncoder(w).Encode(map[string]string{"level": lvl.String()}) //nolint:errcheck
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleManagerLogsFile serves the last 1 MB of the manager log file so the
+// Logs page can load history beyond the 500-entry ring buffer.
+// Returns 404 when no log file path has been configured.
+func (s *Server) handleManagerLogsFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.logFilePath == "" {
+		http.Error(w, "log file not available", http.StatusNotFound)
+		return
+	}
+	f, err := os.Open(s.logFilePath)
+	if err != nil {
+		http.Error(w, "failed to open log file", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	const maxBytes = 1 << 20 // 1 MB
+	info, err := f.Stat()
+	if err != nil {
+		http.Error(w, "failed to stat log file", http.StatusInternalServerError)
+		return
+	}
+	offset := info.Size() - maxBytes
+	if offset < 0 {
+		offset = 0
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		http.Error(w, "failed to seek log file", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	io.Copy(w, f) //nolint:errcheck
 }

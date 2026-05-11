@@ -20,7 +20,7 @@ import (
 	"github.com/ylallemant/synergia/internal/client/consent"
 	"github.com/ylallemant/synergia/internal/client/gpu"
 	"github.com/ylallemant/synergia/internal/client/hwinfo"
-	"github.com/ylallemant/synergia/internal/client/logbuffer"
+	"github.com/ylallemant/synergia/internal/logbuffer"
 	"github.com/ylallemant/synergia/internal/client/workerconfig"
 )
 

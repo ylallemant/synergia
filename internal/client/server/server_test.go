@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	"github.com/ylallemant/synergia/internal/client/logbuffer"
+	"github.com/ylallemant/synergia/internal/logbuffer"
 )
 
 // newTestServer builds a minimal Server suitable for unit tests.

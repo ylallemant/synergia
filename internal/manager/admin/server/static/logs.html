@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logs — Synergia Admin</title>
+<link rel="stylesheet" href="/static/default.css">
+<style>
+.log-toolbar{display:flex;align-items:center;gap:0.75rem;padding:0.6rem 1rem;background:#1e293b;border:1px solid #334155;border-radius:6px;margin-bottom:1rem;flex-wrap:wrap}
+.log-toolbar select,.log-toolbar input[type=text]{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:0.25rem 0.5rem;font-size:12px;font-family:"SF Mono","Fira Code",Consolas,monospace}
+.log-toolbar label{color:#94a3b8;font-size:11px;display:flex;align-items:center;gap:0.4rem}
+#log-search{flex:1;min-width:10rem;color:#e2e8f0}
+#log-search.invalid{border-color:#ef4444;color:#fca5a5}
+.log-status{margin-left:auto;font-size:11px;color:#64748b}
+.log-status.ok{color:#22c55e}
+.log-status.err{color:#ef4444}
+#log-container{font-family:"SF Mono","Fira Code",Consolas,monospace;font-size:12px;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:0.5rem 1rem;height:calc(100vh - 260px);overflow-y:auto}
+.log-entry{display:flex;gap:1rem;padding:1px 0;line-height:1.5}
+.log-entry:hover{background:#1e293b}
+.log-ts{color:#475569;flex-shrink:0;white-space:nowrap;width:10rem}
+.log-lvl{flex-shrink:0;white-space:nowrap;width:3.5rem;font-weight:700}
+.log-lvl.trace,.log-lvl.debug{color:#64748b}
+.log-lvl.info{color:#38bdf8}
+.log-lvl.warn{color:#fbbf24}
+.log-lvl.error,.log-lvl.fatal,.log-lvl.panic{color:#f87171}
+.log-msg{flex:1;min-width:0;white-space:pre-wrap;word-break:break-all;color:#e2e8f0}
+.log-fields{color:#94a3b8}
+</style>
+</head>
+<body>
+
+<nav class="top-nav">
+  <a class="nav-brand" href="/">Synergia Administration <span style="font-weight:400">v{{.ManagerVersion}}</span></a>
+  <button class="nav-burger" id="navToggle" aria-label="Open menu">
+    <span></span><span></span><span></span>
+  </button>
+</nav>
+<div class="nav-overlay" id="navOverlay"></div>
+<aside class="nav-panel" id="navPanel">
+  <button class="nav-close" id="navClose" aria-label="Close menu">&#x2715;</button>
+  <nav class="nav-links">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/admin/workers" class="nav-link">Workers</a>
+    <a href="/admin/inference" class="nav-link">Inference</a>
+    <a href="/admin/oidc" class="nav-link">OIDC Settings</a>
+    <a href="/admin/logs" class="nav-link active">Logs</a>
+    <div class="nav-divider"></div>
+    <a href="/logout" class="nav-link nav-link-danger">Log out</a>
+  </nav>
+</aside>
+
+<h1>Manager Logs</h1>
+
+<div class="log-toolbar">
+  <label>Display:
+    <select id="log-filter">
+      <option value="">all</option>
+      <option value="debug">debug+</option>
+      <option value="info">info+</option>
+      <option value="warn">warn+</option>
+      <option value="error">error+</option>
+    </select>
+  </label>
+  <label>Runtime level:
+    <select id="runtime-level" onchange="setRuntimeLevel(this.value)">
+      <option value="trace">trace</option>
+      <option value="debug">debug</option>
+      <option value="info" selected>info</option>
+      <option value="warn">warn</option>
+      <option value="error">error</option>
+    </select>
+  </label>
+  <input type="text" id="log-search" placeholder="search / regexp…" autocomplete="off" spellcheck="false">
+  <label><input type="checkbox" id="autoscroll" checked> Auto-scroll</label>
+  <button class="btn" onclick="refreshFromFile()" title="Reload last 1 MB of log file and re-apply filters">Refresh</button>
+  <button class="btn" onclick="clearLog()">Clear</button>
+  <span class="log-status" id="log-conn-status">connecting…</span>
+</div>
+
+<div id="log-container"></div>
+
+<script>
+const LEVELS = {trace:0,debug:1,info:2,warn:3,error:4,fatal:5,panic:6};
+const container  = document.getElementById('log-container');
+const statusEl   = document.getElementById('log-conn-status');
+const filterEl   = document.getElementById('log-filter');
+const scrollEl   = document.getElementById('autoscroll');
+const searchEl   = document.getElementById('log-search');
+
+let entries  = [];
+let searchRe = null;
+
+function clearLog() { entries = []; container.innerHTML = ''; }
+
+function minLevel() { return LEVELS[filterEl.value] ?? -1; }
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderEntry(raw) {
+  let obj;
+  try { obj = JSON.parse(raw); } catch { return null; }
+
+  const lvlStr = (obj.level || 'info').toLowerCase();
+  const lvlNum = LEVELS[lvlStr] ?? 2;
+  if (lvlNum < minLevel()) return null;
+  if (searchRe && !searchRe.test(raw)) return null;
+
+  const ts     = (obj.time || '').replace('T',' ').replace(/\..+$/,'').replace(/[+-]\d{2}:\d{2}$/,'').replace('Z','');
+  const msg    = obj.message || obj.msg || '';
+  const fields = Object.entries(obj)
+    .filter(([k]) => !['level','time','message','msg','caller'].includes(k))
+    .map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(' ');
+
+  const el = document.createElement('div');
+  el.className = 'log-entry';
+  el.innerHTML =
+    `<span class="log-ts">${ts}</span>` +
+    `<span class="log-lvl ${lvlStr}">${lvlStr.toUpperCase().padEnd(5)}</span>` +
+    `<span class="log-msg">${escHtml(msg)}${fields ? ' <span class="log-fields">'+escHtml(fields)+'</span>' : ''}</span>`;
+  return el;
+}
+
+function rerender() {
+  container.innerHTML = '';
+  for (const raw of entries) {
+    const el = renderEntry(raw);
+    if (el) container.appendChild(el);
+  }
+  if (scrollEl.checked) container.scrollTop = container.scrollHeight;
+}
+
+function append(raw) {
+  entries.push(raw);
+  const el = renderEntry(raw);
+  if (!el) return;
+  container.appendChild(el);
+  if (scrollEl.checked) container.scrollTop = container.scrollHeight;
+}
+
+filterEl.addEventListener('change', rerender);
+
+// Reload last 1 MB from log file and replace ring-buffer snapshot.
+async function refreshFromFile() {
+  try {
+    const resp = await fetch('/api/manager/logs-file');
+    if (!resp.ok) return;
+    const text = await resp.text();
+    entries = text.split('\n').filter(l => l.trim());
+    rerender();
+  } catch { /* network error — ignore */ }
+}
+
+let searchTimer;
+searchEl.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    const val = searchEl.value.trim();
+    if (!val) {
+      searchRe = null;
+      searchEl.classList.remove('invalid');
+    } else {
+      try {
+        searchRe = new RegExp(val, 'i');
+        searchEl.classList.remove('invalid');
+      } catch {
+        searchRe = null;
+        searchEl.classList.add('invalid');
+      }
+    }
+    rerender();
+  }, 150);
+});
+
+fetch('/api/manager/log-level')
+  .then(r => r.json())
+  .then(d => { if (d.level) document.getElementById('runtime-level').value = d.level; })
+  .catch(() => {});
+
+function setRuntimeLevel(level) {
+  fetch('/api/manager/log-level', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({level})
+  }).catch(() => {});
+}
+
+const es = new EventSource('/api/manager/logs');
+es.onopen    = () => { statusEl.textContent = 'connected'; statusEl.className = 'log-status ok'; };
+es.onerror   = () => { statusEl.textContent = 'disconnected — retrying…'; statusEl.className = 'log-status err'; };
+es.onmessage = e => append(e.data);
+</script>
+
+<script>
+// Nav panel toggle (same as other admin pages)
+const navToggle  = document.getElementById('navToggle');
+const navPanel   = document.getElementById('navPanel');
+const navOverlay = document.getElementById('navOverlay');
+const navClose   = document.getElementById('navClose');
+function openNav()  { navPanel.classList.add('open'); navOverlay.classList.add('open'); }
+function closeNav() { navPanel.classList.remove('open'); navOverlay.classList.remove('open'); }
+navToggle.addEventListener('click', openNav);
+navClose.addEventListener('click', closeNav);
+navOverlay.addEventListener('click', closeNav);
+</script>
+</body>
+</html>

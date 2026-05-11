@@ -23,7 +23,7 @@ import (
 	"github.com/ylallemant/synergia/internal/client/autostart"
 	"github.com/ylallemant/synergia/internal/client/backend"
 	"github.com/ylallemant/synergia/internal/client/branding"
-	"github.com/ylallemant/synergia/internal/client/logbuffer"
+	"github.com/ylallemant/synergia/internal/logbuffer"
 	"github.com/ylallemant/synergia/internal/client/browser"
 	"github.com/ylallemant/synergia/internal/client/config"
 	"github.com/ylallemant/synergia/internal/client/connection"

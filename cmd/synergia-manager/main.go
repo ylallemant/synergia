@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/ylallemant/synergia/internal/logbuffer"
 	"github.com/ylallemant/synergia/internal/manager/acme"
 	"github.com/ylallemant/synergia/internal/manager/api"
 	adminapi "github.com/ylallemant/synergia/internal/manager/admin/api"
@@ -28,14 +30,18 @@ import (
 	"github.com/ylallemant/synergia/internal/manager/store"
 )
 
-func initLogger() {
+// initLogger configures zerolog to write to stdout and the provided ring buffer.
+// If the LOG_FILE env var is set the raw JSON is also appended to that file,
+// which the admin Logs page can serve as "last 1 MB" history.
+// Returns the resolved log file path (empty when LOG_FILE is unset).
+func initLogger(buf *logbuffer.Buffer) string {
 	noColor := true
 	if fi, err := os.Stdout.Stat(); err == nil {
 		noColor = (fi.Mode() & os.ModeCharDevice) == 0
 	}
 
-	output := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339, NoColor: noColor}
-	output.FormatLevel = func(i interface{}) string {
+	console := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339, NoColor: noColor}
+	console.FormatLevel = func(i interface{}) string {
 		return strings.ToUpper(fmt.Sprintf("| %-6s|", i))
 	}
 	zerolog.CallerMarshalFunc = func(pc uintptr, file string, line int) string {
@@ -50,7 +56,21 @@ func initLogger() {
 	}
 	zerolog.SetGlobalLevel(level)
 
-	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
+	writers := []io.Writer{console, buf}
+	var logFilePath string
+	if lf := os.Getenv("LOG_FILE"); lf != "" {
+		f, err := os.OpenFile(lf, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			writers = append(writers, f)
+			logFilePath = lf
+		} else {
+			// Log the warning after the logger is set up below.
+			_ = err
+		}
+	}
+
+	log.Logger = zerolog.New(zerolog.MultiLevelWriter(writers...)).With().Timestamp().Caller().Logger()
+	return logFilePath
 }
 
 // version and commit are set at build time via -ldflags:
@@ -68,7 +88,8 @@ func main() {
 		}
 	}
 
-	initLogger()
+	logBuf := logbuffer.New(500)
+	logFilePath := initLogger(logBuf)
 
 	// Parse CLI flags
 	for _, arg := range os.Args[1:] {
@@ -317,6 +338,7 @@ func main() {
 		log.Fatal().Err(err).Msg("auth initialization error")
 	}
 	adminServer := adminsrv.New(cfg.AdminAddr, cfg.APIKey, version, db, adminCache, cfg.Insecure, cfg.TLSCertFile, cfg.TLSKeyFile, authInstance)
+	adminServer.SetLogBuffer(logBuf, logFilePath)
 	adminServer.HandleFuncAdmin("/v1/latency", latencyAPI.LatencyHandler)
 	adminServer.HandleFuncAdmin("/v1/latency/config", latencyAPI.ConfigHandler)
 	adminServer.HandleFuncAdmin("/v1/admin/version", adminVersionAPI.AdminVersionHandler)
