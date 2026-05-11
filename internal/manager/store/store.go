@@ -682,10 +682,6 @@ func (s *Store) UpdateWorkerSyncStatus(fingerprint string) string {
 	if err := s.DB.Where("fingerprint = ?", fingerprint).First(&worker).Error; err != nil {
 		return "out-of-sync"
 	}
-	if worker.LLMHash == "" {
-		s.DB.Model(&Worker{}).Where("fingerprint = ?", fingerprint).Update("sync_status", "out-of-sync")
-		return "out-of-sync"
-	}
 
 	// Determine the worker's role from config (default "inference")
 	role := "inference"
@@ -694,9 +690,25 @@ func (s *Store) UpdateWorkerSyncStatus(fingerprint string) string {
 		role = wc.PreferredRole
 	}
 
-	// Try preferred role first
+	// If the role has no model hash on the server there is nothing to enforce —
+	// treat the worker as synced. This covers the tester role (connectivity-only,
+	// no local LLM required) and any role whose model files haven't been uploaded
+	// to the server yet.
 	var rm RoleModel
-	if err := s.DB.Where("role = ?", role).First(&rm).Error; err == nil && rm.ModelFileHash != "" {
+	if err := s.DB.Where("role = ?", role).First(&rm).Error; err == nil && rm.ModelFileHash == "" {
+		s.DB.Model(&Worker{}).Where("fingerprint = ?", fingerprint).Update("sync_status", "synced")
+		return "synced"
+	}
+
+	// Beyond this point the role has a known expected hash; the worker must
+	// report a matching llm_hash to be considered synced.
+	if worker.LLMHash == "" {
+		s.DB.Model(&Worker{}).Where("fingerprint = ?", fingerprint).Update("sync_status", "out-of-sync")
+		return "out-of-sync"
+	}
+
+	// Try preferred role first
+	if rm.ModelFileHash != "" {
 		expectedHash := protocol.ComputeLLMHash(role, rm.ModelFileHash)
 		if worker.LLMHash == expectedHash {
 			s.DB.Model(&Worker{}).Where("fingerprint = ?", fingerprint).Update("sync_status", "synced")
