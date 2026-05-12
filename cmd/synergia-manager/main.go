@@ -218,23 +218,10 @@ func main() {
 	}
 	modelsAPI := api.NewModelsDownloadAPI(gw.WorkerKey, modelStore, db)
 
-	// Compute and store file hashes for any roles that have a model filename but no file hash yet
-	roles, _ := db.GetRoleModels()
-	for _, r := range roles {
-		if r.ModelFilename != "" && r.ModelFileHash == "" {
-			ctx := context.Background()
-			hash, hashErr := modelStore.FileHash(ctx, r.ModelFilename)
-			if hashErr != nil {
-				log.Warn().Err(hashErr).Str("role", r.Role).Str("filename", r.ModelFilename).Msg("could not compute model file hash")
-				continue
-			}
-			if err := db.UpsertRoleModel(r.Role, r.LLMModel, r.Quantisation, r.ModelFilename, hash, r.MinVRAMMB, r.Description); err != nil {
-				log.Warn().Err(err).Str("role", r.Role).Msg("failed to update model file hash")
-			} else {
-				log.Info().Str("role", r.Role).Str("hash", hash[:16]+"...").Msg("model file hash computed and stored")
-			}
-		}
-	}
+	// Ensure all configured role models are in the cache:
+	// - compute hashes for files that exist but have no stored hash
+	// - start background downloads for missing files that have a DownloadURL
+	go modelsAPI.EnsureModelCache()
 
 	consentAPI := api.NewConsentAPI(gw.WorkerKey, db)
 	// Worker-facing APIs — all use gw.WorkerKey so they reflect live auth-mode

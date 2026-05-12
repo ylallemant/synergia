@@ -22,6 +22,7 @@ import (
 	"github.com/ylallemant/synergia/internal/client/gpu"
 	"github.com/ylallemant/synergia/internal/client/hwinfo"
 	"github.com/ylallemant/synergia/internal/logbuffer"
+	"github.com/ylallemant/synergia/internal/client/version"
 	"github.com/ylallemant/synergia/internal/client/workerconfig"
 )
 
@@ -67,6 +68,8 @@ type Server struct {
 	onGoodbye func()
 	// uninstallFn replaces doUninstall in tests so os.Exit is never called.
 	uninstallFn func()
+	// onLogLevelSave is called after a log level change so it can be persisted.
+	onLogLevelSave func(level string)
 
 	// SSE subscribers for /api/status-events
 	statusSubsMu sync.Mutex
@@ -75,7 +78,8 @@ type Server struct {
 }
 
 // SetGoodbyeCallback registers the function called when the worker uninstalls.
-func (s *Server) SetGoodbyeCallback(fn func()) { s.onGoodbye = fn }
+func (s *Server) SetGoodbyeCallback(fn func())          { s.onGoodbye = fn }
+func (s *Server) SetLogLevelSaveCallback(fn func(string)) { s.onLogLevelSave = fn }
 
 // BuildGoodbyeBody constructs the signed goodbye JSON body that the worker
 // sends to the manager on uninstall. Extracted as a package-level function
@@ -171,6 +175,7 @@ func (s *Server) buildStatusPayload() []byte {
 	llmReachable, llmError := s.status.LLMReachable()
 
 	payload := map[string]any{
+		"version":            version.Version,
 		"connected":          s.status.IsConnected(),
 		"processing":         s.status.IsProcessing(),
 		"paused":             s.status.IsPaused(),
@@ -751,6 +756,9 @@ func (s *Server) handleLogLevel(w http.ResponseWriter, r *http.Request) {
 		}
 		zerolog.SetGlobalLevel(lvl)
 		log.Info().Str("level", lvl.String()).Msg("log level changed")
+		if s.onLogLevelSave != nil {
+			s.onLogLevelSave(lvl.String())
+		}
 		json.NewEncoder(w).Encode(map[string]string{"level": lvl.String()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/rs/zerolog/log"
 	"github.com/ylallemant/synergia/internal/manager/models"
@@ -18,6 +19,11 @@ type ModelsDownloadAPI struct {
 	workerKeyFn func() string
 	modelStore  models.Store
 	dbStore     *store.Store
+
+	// cachingMu guards the caching map so concurrent requests for the same
+	// file start only one background download.
+	cachingMu sync.Mutex
+	caching   map[string]struct{} // filename → download in progress
 }
 
 func NewModelsDownloadAPI(workerKeyFn func() string, ms models.Store, db *store.Store) *ModelsDownloadAPI {
@@ -25,6 +31,7 @@ func NewModelsDownloadAPI(workerKeyFn func() string, ms models.Store, db *store.
 		workerKeyFn: workerKeyFn,
 		modelStore:  ms,
 		dbStore:     db,
+		caching:     make(map[string]struct{}),
 	}
 }
 
@@ -94,10 +101,11 @@ func (m *ModelsDownloadAPI) DownloadHandler(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-// fetchAndCacheModel looks up the DownloadURL for the given filename across all role models,
-// downloads the file into the model store, and updates the stored file hash.
-// Returns true if the file was successfully fetched and cached.
-func (m *ModelsDownloadAPI) fetchAndCacheModel(ctx context.Context, filename string) bool {
+// fetchAndCacheModel starts a background download for the given filename if a
+// DownloadURL is configured for the matching role and no download is already
+// in progress. It returns false immediately — the caller should return 404 and
+// let the client retry; subsequent requests will be served once caching completes.
+func (m *ModelsDownloadAPI) fetchAndCacheModel(_ context.Context, filename string) bool {
 	roles, err := m.dbStore.GetRoleModels()
 	if err != nil {
 		return false
@@ -107,26 +115,94 @@ func (m *ModelsDownloadAPI) fetchAndCacheModel(ctx context.Context, filename str
 		if filepath.Base(rm.ModelFilename) != base || rm.DownloadURL == "" {
 			continue
 		}
-		log.Info().Str("filename", base).Str("url", rm.DownloadURL).Str("role", rm.Role).Msg("fetching model from download URL")
-		resp, err := http.Get(rm.DownloadURL) //nolint:gosec
-		if err != nil || resp.StatusCode != http.StatusOK {
-			if resp != nil {
-				resp.Body.Close()
-			}
-			log.Warn().Str("url", rm.DownloadURL).Msg("model fetch failed")
+		m.cachingMu.Lock()
+		_, alreadyRunning := m.caching[base]
+		if !alreadyRunning {
+			m.caching[base] = struct{}{}
+		}
+		m.cachingMu.Unlock()
+
+		if alreadyRunning {
+			log.Debug().Str("filename", base).Msg("model download already in progress — client should retry")
 			return false
 		}
-		defer resp.Body.Close()
-		hash, err := m.modelStore.Save(ctx, base, resp.Body)
-		if err != nil {
-			log.Warn().Err(err).Str("filename", base).Msg("model save failed")
-			return false
-		}
-		_ = m.dbStore.SetRoleModelFileHash(rm.Role, hash)
-		log.Info().Str("filename", base).Str("hash", hash[:16]+"...").Msg("model cached from download URL")
-		return true
+		go m.downloadModelFile(rm.Role, base, rm.DownloadURL)
+		return false // client gets 404 now; file will be ready on retry
 	}
 	return false
+}
+
+// downloadModelFile fetches filename from downloadURL, stores it in the model
+// store, and updates the role's ModelFileHash. It is safe to call concurrently;
+// the caching map prevents duplicate downloads for the same file.
+func (m *ModelsDownloadAPI) downloadModelFile(role, filename, downloadURL string) {
+	defer func() {
+		m.cachingMu.Lock()
+		delete(m.caching, filename)
+		m.cachingMu.Unlock()
+	}()
+
+	log.Info().Str("role", role).Str("filename", filename).Str("url", downloadURL).
+		Msg("model cache: starting background download")
+
+	resp, err := http.Get(downloadURL) //nolint:gosec
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		log.Warn().Str("url", downloadURL).Str("filename", filename).Msg("model cache: download request failed")
+		return
+	}
+	defer resp.Body.Close()
+
+	// Use Background context so a client request timeout never aborts the save.
+	hash, err := m.modelStore.Save(context.Background(), filename, resp.Body)
+	if err != nil {
+		log.Warn().Err(err).Str("filename", filename).Msg("model cache: save failed")
+		return
+	}
+	_ = m.dbStore.SetRoleModelFileHash(role, hash)
+	log.Info().Str("role", role).Str("filename", filename).Str("hash", hash[:16]+"...").
+		Msg("model cache: download complete — file now available to workers")
+}
+
+// EnsureModelCache is called at startup. For each configured role it:
+//   - computes and stores the file hash if the file exists but has no hash
+//   - starts a background download if the file is missing and a DownloadURL is set
+func (m *ModelsDownloadAPI) EnsureModelCache() {
+	roles, err := m.dbStore.GetRoleModels()
+	if err != nil {
+		log.Warn().Err(err).Msg("model cache: could not load roles")
+		return
+	}
+	for _, rm := range roles {
+		if rm.ModelFilename == "" {
+			continue
+		}
+		if rm.ModelFileHash == "" {
+			// File might exist in store already — try to hash it.
+			if hash, hashErr := m.modelStore.FileHash(context.Background(), rm.ModelFilename); hashErr == nil {
+				_ = m.dbStore.SetRoleModelFileHash(rm.Role, hash)
+				log.Info().Str("role", rm.Role).Str("hash", hash[:16]+"...").Msg("model cache: file hash computed and stored")
+				continue
+			}
+			// File missing — trigger download if a URL is configured.
+			if rm.DownloadURL != "" {
+				m.cachingMu.Lock()
+				_, running := m.caching[rm.ModelFilename]
+				if !running {
+					m.caching[rm.ModelFilename] = struct{}{}
+				}
+				m.cachingMu.Unlock()
+				if !running {
+					go m.downloadModelFile(rm.Role, rm.ModelFilename, rm.DownloadURL)
+				}
+			} else {
+				log.Warn().Str("role", rm.Role).Str("filename", rm.ModelFilename).
+					Msg("model cache: file missing and no download URL configured — set one in Inference → Role Mappings")
+			}
+		}
+	}
 }
 
 func (m *ModelsDownloadAPI) authenticate(r *http.Request) bool {

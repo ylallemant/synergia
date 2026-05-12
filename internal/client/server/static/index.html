@@ -10,7 +10,7 @@
 <body>
     <div class="container">
         <div class="header-line">
-            <h1>Synergia Worker</h1>
+            <h1>Synergia Worker <span id="client-version" style="font-weight:400;font-size:0.8em;opacity:0.7"></span></h1>
             <div class="status-line">
                 <span id="status-dot" class="status-dot dot-red"></span>
                 <span id="status-text">Connecting...</span>
@@ -272,6 +272,9 @@
         // applyStatus updates the entire UI from a status payload object.
         // Called by both the SSE handler (on change) and the polling fallback.
         function applyStatus(data) {
+            if (data.version) {
+                document.getElementById('client-version').textContent = 'v' + data.version;
+            }
             document.getElementById('model').textContent = data.model || '—';
             document.getElementById('quantisation').textContent = data.quantisation || '—';
             document.getElementById('gpu-state').textContent = data.gpu_state || '—';

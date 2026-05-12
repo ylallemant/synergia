@@ -47,6 +47,10 @@ type Persisted struct {
 	// BackendVersion is the version tag of the installed llama-server binary.
 	BackendVersion string `yaml:"backend_version,omitempty"`
 
+	// LogLevel is the zerolog level string last set via the dashboard (e.g. "debug", "info").
+	// Restored on startup so the worker keeps the same verbosity across restarts.
+	LogLevel string `yaml:"log_level,omitempty"`
+
 	UpdatedAt time.Time `yaml:"updated_at"`
 }
 
@@ -103,6 +107,14 @@ func (s *Store) SetModel(path string, params LlamaParams, role string) {
 func (s *Store) SetBackendVersion(version string) {
 	s.mu.Lock()
 	s.current.BackendVersion = version
+	s.mu.Unlock()
+	s.save()
+}
+
+// SetLogLevel saves the zerolog level string so it is restored on next startup.
+func (s *Store) SetLogLevel(level string) {
+	s.mu.Lock()
+	s.current.LogLevel = level
 	s.mu.Unlock()
 	s.save()
 }

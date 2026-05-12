@@ -190,6 +190,17 @@ func main() {
 		wstate, _ = workerstate.Load(cfg.DataDir) // returns empty store on error
 	}
 
+	// Restore log level from persisted state (unless overridden by LOG_LEVEL env var).
+	// LOG_LEVEL env var takes precedence; state is the persisted user preference.
+	if os.Getenv("LOG_LEVEL") == "" {
+		if saved := wstate.Get().LogLevel; saved != "" {
+			if lvl, parseErr := zerolog.ParseLevel(saved); parseErr == nil {
+				zerolog.SetGlobalLevel(lvl)
+				log.Info().Str("level", saved).Msg("restored log level from persisted state")
+			}
+		}
+	}
+
 	// If no manager URL was passed via flag/env, fall back to the persisted one.
 	// This means the binary no longer needs sentinel patching for reconnects after updates.
 	if cfg.ManagerURL == "" {
@@ -300,6 +311,7 @@ func main() {
 	})
 
 	srv := server.New(cfg.DashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath, cfg.DataDir)
+	srv.SetLogLevelSaveCallback(func(level string) { wstate.SetLogLevel(level) })
 	adminURL := localAdminURL(cfg.ManagerURL, cfg.WorkerKey)
 	t := tray.New(sp, "http://"+cfg.DashboardAddr+"/static/index.html", adminURL)
 
