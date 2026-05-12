@@ -43,6 +43,8 @@ type Connection struct {
 	done            chan struct{}
 	connectedCh     chan struct{} // closed on first successful connection
 	connOnce        sync.Once
+
+	onConnect func() // called on every successful (re)connection
 }
 
 func New(url, workerKey string, id *identity.Identity, model, quantisation, tlsCACert string) *Connection {
@@ -158,6 +160,12 @@ func (c *Connection) connect(ctx context.Context) error {
 
 	// Signal first connection
 	c.connOnce.Do(func() { close(c.connectedCh) })
+
+	// Fire the per-connect hook (e.g. send InitialSync or initial "available")
+	// in a goroutine so it doesn't block the connection setup.
+	if c.onConnect != nil {
+		go c.onConnect()
+	}
 	// Start heartbeat
 	heartbeatCtx, heartbeatCancel := context.WithCancel(ctx)
 	defer heartbeatCancel()
@@ -299,13 +307,15 @@ func (c *Connection) SendStatus(state string) error {
 	log.Debug().Str("state", state).Msg("sending status update")
 	c.mu.Lock()
 	hash := c.llmHash
+	backendHash := c.backendHash
 	avg := c.gpuAvg
 	c.mu.Unlock()
 	return c.Send(&protocol.Status{
-		Type:    protocol.TypeStatus,
-		State:   state,
-		LLMHash: hash,
-		GPUAvg:  avg,
+		Type:        protocol.TypeStatus,
+		State:       state,
+		LLMHash:     hash,
+		BackendHash: backendHash,
+		GPUAvg:      avg,
 	})
 }
 
@@ -350,6 +360,32 @@ func (c *Connection) GetBackendHash() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.backendHash
+}
+
+// SetOnConnect registers a callback that is invoked on every successful
+// (re)connection, including after transient failures. Use this instead of
+// <-Connected() when the action must repeat on every reconnect.
+func (c *Connection) SetOnConnect(fn func()) {
+	c.mu.Lock()
+	c.onConnect = fn
+	c.mu.Unlock()
+}
+
+// SendInitialSync requests the manager to push any missing backend binary or
+// model on a fresh installation. hasBinary / hasModel reflect the client's
+// current disk state; role tells the manager which model to configure.
+func (c *Connection) SendInitialSync(hasBinary, hasModel bool, role string) error {
+	log.Info().
+		Bool("has_binary", hasBinary).
+		Bool("has_model", hasModel).
+		Str("role", role).
+		Msg("requesting initial sync from manager")
+	return c.Send(&protocol.InitialSync{
+		Type:      protocol.TypeInitialSync,
+		HasBinary: hasBinary,
+		HasModel:  hasModel,
+		Role:      role,
+	})
 }
 
 // SendLLMHashReport sends an explicit LLM hash report to the cluster manager.

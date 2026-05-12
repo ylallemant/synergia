@@ -72,6 +72,11 @@ type Worker struct {
 	restartFn      func()       // called after successful binary update
 	backendRestart func() error // called after backend binary update (restart llama-server)
 	restartLLM     func(modelPath string, p backend.LlamaParams) error // called after model update
+
+	// Last verified model path and params — used by backendRestart as fallback
+	// so llama-server starts even when BackendUpdate arrives before ModelUpdate.
+	lastModelPath   string
+	lastLlamaParams backend.LlamaParams
 	role           string
 	modelsDir      string
 	managerHTTPURL string
@@ -364,6 +369,7 @@ func (w *Worker) handleModelUpdate(mu *protocol.ModelUpdate) {
 		return
 	}
 
+	log.Info().Str("filename", mu.Filename).Str("dest", w.modelsDir).Msg("backend: downloading model file from manager")
 	modelPath, err := w.downloadModel(mu.Filename)
 	if err != nil {
 		log.Error().Err(err).Str("filename", mu.Filename).Msg("failed to download model file")
@@ -374,6 +380,7 @@ func (w *Worker) handleModelUpdate(mu *protocol.ModelUpdate) {
 		return
 	}
 
+	log.Info().Str("path", modelPath).Msg("backend: model file downloaded — verifying hash")
 	// Compute SHA256 of the downloaded file
 	fileHash, err := protocol.HashFile(modelPath)
 	if err != nil {
@@ -411,18 +418,32 @@ func (w *Worker) handleModelUpdate(mu *protocol.ModelUpdate) {
 		log.Error().Err(err).Msg("failed to send LLM hash report after model update")
 	}
 
-	// Restart llama-server with the new model file and parameters from the manager.
+	// Store model path and params so backendRestart can fall back to Start()
+	// if the binary arrives after this ModelUpdate (InitialSync ordering race).
+	p := backend.LlamaParams{
+		ContextSize:    mu.ContextSize,
+		ParallelSlots:  mu.ParallelSlots,
+		GPULayers:      mu.GPULayers,
+		EndpointType:   mu.EndpointType,
+		FlashAttention: mu.FlashAttention,
+	}
+	w.lastModelPath = modelPath
+	w.lastLlamaParams = p
+
 	if w.restartLLM != nil {
-		p := backend.LlamaParams{
-			ContextSize:    mu.ContextSize,
-			ParallelSlots:  mu.ParallelSlots,
-			GPULayers:      mu.GPULayers,
-			EndpointType:   mu.EndpointType,
-			FlashAttention: mu.FlashAttention,
-		}
+		log.Info().
+			Str("model", mu.Filename).
+			Str("endpoint_type", p.EndpointType).
+			Int("ctx_size", p.ContextSize).
+			Int("parallel_slots", p.ParallelSlots).
+			Int("gpu_layers", p.GPULayers).
+			Bool("flash_attention", p.FlashAttention).
+			Msg("backend: restarting llama-server with new model config")
 		if err := w.restartLLM(modelPath, p); err != nil {
-			log.Warn().Err(err).Msg("failed to restart llama-server after model update")
+			log.Warn().Err(err).Msg("backend: failed to restart llama-server after model update")
 		}
+	} else {
+		log.Info().Str("model", mu.Filename).Msg("backend: model update applied but no llama restarter configured")
 	}
 
 	_ = w.conn.SendStatus("available")
@@ -543,7 +564,8 @@ func (w *Worker) handleBackendUpdate(bu *protocol.BackendUpdate) {
 
 	log.Info().
 		Str("version", bu.Version).
-		Msg("received backend update notification")
+		Str("download_url", bu.DownloadURL).
+		Msg("backend: manager pushed binary update — downloading")
 
 	if err := w.conn.SendStatus("updating"); err != nil {
 		log.Warn().Err(err).Msg("failed to send updating status")
@@ -551,7 +573,7 @@ func (w *Worker) handleBackendUpdate(bu *protocol.BackendUpdate) {
 
 	updated, err := w.backendMgr.Apply(bu)
 	if err != nil {
-		log.Error().Err(err).Msg("backend update failed")
+		log.Error().Err(err).Msg("backend: binary download/install failed")
 		if w.reporter != nil {
 			w.reporter.Report(err)
 		}
@@ -562,16 +584,28 @@ func (w *Worker) handleBackendUpdate(bu *protocol.BackendUpdate) {
 	if updated {
 		// Update the connection's backend hash so the manager knows we're synced
 		w.conn.SetBackendHash(w.backendMgr.Hash())
+		log.Info().Str("version", bu.Version).Str("hash", w.backendMgr.Hash()[:16]+"...").
+			Msg("backend: binary installed — restarting llama-server")
 
-		// Restart llama-server with the new binary
+		// Restart llama-server with the new binary.
+		// If a model has already been verified (lastModelPath set by a prior
+		// ModelUpdate), call restartLLM directly so the ordering doesn't matter
+		// (BackendUpdate may arrive before or after ModelUpdate in InitialSync).
 		if w.backendRestart != nil {
 			if err := w.backendRestart(); err != nil {
-				log.Error().Err(err).Msg("failed to restart backend after update")
-				if w.reporter != nil {
-					w.reporter.Report(err)
+				// Restart() fails on first install (no previous Start).
+				// Fall back to Start() with the stored model if available.
+				if w.lastModelPath != "" && w.restartLLM != nil {
+					log.Info().Str("model", w.lastModelPath).
+						Msg("backend: binary installed — starting llama-server with cached model params")
+					if startErr := w.restartLLM(w.lastModelPath, w.lastLlamaParams); startErr != nil {
+						log.Warn().Err(startErr).Msg("backend: failed to start llama-server after binary install")
+					}
+				} else {
+					log.Info().Err(err).Msg("backend: binary installed — llama-server will start after first model update")
 				}
 			} else {
-				log.Info().Msg("backend restarted with new binary")
+				log.Info().Msg("backend: llama-server restarted with new binary")
 			}
 		}
 	}

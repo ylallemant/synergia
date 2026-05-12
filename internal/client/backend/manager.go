@@ -213,6 +213,18 @@ func (m *Manager) Start(port, modelPath string, p LlamaParams) error {
 	}
 
 	cmd := exec.Command(m.binaryPath, BuildArgs(port, modelPath, p)...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// Ensure the binary's own directory is in the dynamic-linker search path.
+	// Real llama.cpp release archives place shared libs alongside the binary
+	// (flat layout); Homebrew installs use @rpath/../lib. Including the binary
+	// directory first covers the flat layout; the existing DYLD_LIBRARY_PATH /
+	// LD_LIBRARY_PATH from the parent process covers the rest.
+	binDir := filepath.Dir(m.binaryPath)
+	cmd.Env = append(os.Environ(),
+		"DYLD_LIBRARY_PATH="+binDir+":"+os.Getenv("DYLD_LIBRARY_PATH"),
+		"LD_LIBRARY_PATH="+binDir+":"+os.Getenv("LD_LIBRARY_PATH"),
+	)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start llama-server: %w", err)
 	}
@@ -223,11 +235,15 @@ func (m *Manager) Start(port, modelPath string, p LlamaParams) error {
 	m.lastParams = p
 
 	log.Info().
+		Str("binary", m.binaryPath).
 		Str("port", port).
 		Str("model", filepath.Base(modelPath)).
 		Int("ctx_size", p.ContextSize).
+		Int("parallel_slots", p.ParallelSlots).
 		Int("gpu_layers", p.GPULayers).
-		Msg("llama-server started")
+		Str("endpoint_type", p.EndpointType).
+		Bool("flash_attn", p.FlashAttention).
+		Msg("backend: llama-server process started")
 	return nil
 }
 

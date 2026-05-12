@@ -19,6 +19,7 @@ import (
 	"github.com/ylallemant/synergia/internal/manager/acme"
 	"github.com/ylallemant/synergia/internal/manager/api"
 	adminapi "github.com/ylallemant/synergia/internal/manager/admin/api"
+	"github.com/ylallemant/synergia/internal/manager/backend"
 	"github.com/ylallemant/synergia/internal/manager/admin/auth"
 	adminsrv "github.com/ylallemant/synergia/internal/manager/admin/server"
 	"github.com/ylallemant/synergia/internal/manager/cache"
@@ -118,11 +119,13 @@ func main() {
 	// always receive a freshly-patched binary that matches the current code.
 	checkAndPurgeStaleCache(db, cfg.CacheDir)
 
-	// Seed role-model mappings
-	if cfg.TestSetup {
-		log.Warn().Msg("test-setup mode — seeding role-model mappings with minimal test models")
-		log.Debug().Msg("test-setup: all roles use SmolLM2-135M-Instruct with 512 MB min VRAM — real production roles require 4-20 GB")
-		log.Debug().Msg("test-setup: production roles are embedding=bge-m3(4GB), inference=mistral-nemo-12b(10GB), ingestion=mistral-small-3.1-24b(20GB)")
+	// Seed role-model mappings.
+	// Development mode seeds all test roles (SmolLM2 for every role) and
+	// auto-configures backend + client version targets so fresh workers can
+	// bootstrap without any manual admin action.
+	// Normal install seeds only the "Tester" role; admins configure the rest.
+	if cfg.Development || cfg.TestSetup {
+		log.Warn().Msg("development mode — seeding all roles with SmolLM2-135M-Instruct")
 		if err := db.SeedTestRoles(); err != nil {
 			log.Fatal().Err(err).Msg("failed to seed test roles")
 		}
@@ -140,6 +143,46 @@ func main() {
 	// Always ensure the tester role exists (allows any hardware to participate)
 	if err := db.SeedTesterRole(); err != nil {
 		log.Fatal().Err(err).Msg("failed to seed tester role")
+	}
+
+	// Development mode: auto-configure backend binary version and client version target
+	// so workers can perform a full InitialSync without admin intervention.
+	if cfg.Development {
+		// Backend binary: use CLUSTER_DEV_BACKEND_URL for local testing (fast, no GitHub),
+		// or fetch the latest llama.cpp release tag from GitHub.
+		if _, err := db.GetBackendVersionConfig(); err != nil {
+			backendURL := cfg.DevBackendURL
+			backendVersion := "local"
+			if backendURL == "" {
+				if tags, err := backend.FetchTags(backend.LlamaCpp, 1); err == nil && len(tags) > 0 {
+					backendVersion = tags[0]
+					backendURL = backend.DownloadURLTemplates[backend.LlamaCpp]
+					log.Info().Str("version", backendVersion).Msg("development: fetched latest llama.cpp version")
+				} else {
+					log.Warn().Err(err).Msg("development: could not fetch llama.cpp tags — backend not configured")
+				}
+			}
+			if backendURL != "" {
+				if err := db.SetBackendVersionConfig(backend.LlamaCpp, backendVersion, backendURL, ""); err != nil {
+					log.Warn().Err(err).Msg("development: failed to set backend version config")
+				} else {
+					log.Info().Str("version", backendVersion).Str("url", backendURL).
+						Msg("development: backend version configured")
+				}
+			}
+		}
+
+		// Client version target: set from CLUSTER_DEV_CLIENT_VERSION so binary sync works.
+		if cfg.DevClientVersion != "" {
+			if _, err := db.GetClientVersionConfig(); err != nil {
+				if err := db.SetClientVersionConfig(cfg.DevClientVersion, "all", 100); err != nil {
+					log.Warn().Err(err).Msg("development: failed to set client version config")
+				} else {
+					log.Info().Str("version", cfg.DevClientVersion).
+						Msg("development: client version target configured")
+				}
+			}
+		}
 	}
 
 	// Worker auth mode: TOFU (Ed25519 challenge-response) is the default.
@@ -197,7 +240,7 @@ func main() {
 	// Worker-facing APIs — all use gw.WorkerKey so they reflect live auth-mode
 	// changes (e.g. TOFU toggle via admin UI) without a manager restart.
 	brandingAPI := api.NewBrandingAPI(gw.WorkerKey, db)
-	rolesAPI := api.NewRolesAPI(cfg.APIKey, gw.WorkerKey, db, cfg.TestSetup)
+	rolesAPI := api.NewRolesAPI(cfg.APIKey, gw.WorkerKey, db, cfg.Development || cfg.TestSetup)
 	errorsAPI := api.NewErrorsAPI(gw.WorkerKey, db)
 	versionAPI := api.NewVersionAPI()
 	backendAPI := api.NewBackendAPI(gw.WorkerKey, db, filepath.Join(cfg.CacheDir, "backend"))

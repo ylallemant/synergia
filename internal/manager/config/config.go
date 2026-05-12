@@ -21,9 +21,11 @@ type Config struct {
 	TLSCertFile string // Path to TLS certificate (PEM)
 	TLSKeyFile  string // Path to TLS private key (PEM)
 
-	// Test mode
-	TestSetup   bool // If true, seed role-model mappings with minimal test models
-	Development bool // If true, batch processes sequentially with random 1-5s delays
+	// Test / development mode
+	TestSetup        bool   // If true, seed role-model mappings with minimal test models
+	Development      bool   // If true, seed all test roles and auto-configure backend/client versions
+	DevBackendURL    string // Development: backend download URL (empty = fetch latest from GitHub)
+	DevClientVersion string // Development: client version target (e.g. "0.1.0-dev")
 
 	// Model storage
 	ModelBackend    string // "filesystem" or "s3"
@@ -66,8 +68,10 @@ func Load() (*Config, error) {
 		DBPath:             envOrDefault("CLUSTER_DB_PATH", "cluster-manager.db"),
 		DBDSN:              os.Getenv("CLUSTER_DB_DSN"),
 		Insecure:           os.Getenv("CLUSTER_INSECURE") == "true",
-		TestSetup:          os.Getenv("CLUSTER_TEST_SETUP") == "true",
-		Development:        os.Getenv("CLUSTER_DEVELOPMENT") == "true",
+		TestSetup:        os.Getenv("CLUSTER_TEST_SETUP") == "true",
+		Development:      os.Getenv("CLUSTER_DEVELOPMENT") == "true",
+		DevBackendURL:    os.Getenv("CLUSTER_DEV_BACKEND_URL"),
+		DevClientVersion: os.Getenv("CLUSTER_DEV_CLIENT_VERSION"),
 		TLSCertFile:        os.Getenv("TLS_CERT_FILE"),
 		TLSKeyFile:         os.Getenv("TLS_KEY_FILE"),
 		ModelBackend:       envOrDefault("CLUSTER_MODEL_BACKEND", "filesystem"),

@@ -13,9 +13,10 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
-	"github.com/ylallemant/synergia/internal/protocol"
+	"github.com/ylallemant/synergia/internal/manager/backend"
 	"github.com/ylallemant/synergia/internal/manager/queue"
 	"github.com/ylallemant/synergia/internal/manager/store"
+	"github.com/ylallemant/synergia/internal/protocol"
 )
 
 var upgrader = websocket.Upgrader{
@@ -205,7 +206,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err := g.store.SetWorkerBackendHash(fingerprint, backendHash); err != nil {
 				log.Error().Err(err).Msg("failed to persist worker backend hash")
 			}
-			g.store.UpdateWorkerBackendSyncStatus(fingerprint)
+		}
+		// Always initialise backend_sync_status so the DB default "out-of-sync"
+		// does not persist on fresh workers that connect with backend_hash="".
+		g.store.UpdateWorkerBackendSyncStatus(fingerprint)
+
+		// Initialise binary_sync_status from the client's reported version so the
+		// DB default "out-of-sync" doesn't block aggregated status when a version
+		// target is configured (e.g. development mode sets one on startup).
+		if cfg, err := g.store.GetClientVersionConfig(); err == nil {
+			g.store.UpdateWorkerBinarySyncStatus(fingerprint, cfg.TargetVersion)
 		}
 		g.store.SetWorkerOnlineIfAllowed(fingerprint)
 	}
@@ -380,6 +390,13 @@ func (g *Gateway) readLoop(wc *workerConn) {
 				}
 				g.store.UpdateWorkerSyncStatus(wc.info.Fingerprint)
 			}
+			// Update backend hash if provided — workers report it after installing a new binary.
+			if statusMsg.BackendHash != "" && g.store != nil {
+				if err := g.store.SetWorkerBackendHash(wc.info.Fingerprint, statusMsg.BackendHash); err != nil {
+					log.Error().Err(err).Msg("failed to update worker backend hash from status")
+				}
+				g.store.UpdateWorkerBackendSyncStatus(wc.info.Fingerprint)
+			}
 			// Store GPU baseline avg only when the worker has given consent —
 			// we collect the aggregate (no timeline, no peaks), never raw load curves.
 			if statusMsg.GPUAvg > 0 && g.store != nil && g.store.HasConsent(wc.info.Fingerprint) {
@@ -439,6 +456,65 @@ func (g *Gateway) readLoop(wc *workerConn) {
 					Str("aggregated", aggregated).
 					Str("fingerprint", wc.info.Fingerprint).
 					Msg("worker status transition")
+			}
+
+		case protocol.TypeInitialSync:
+			var syncReq protocol.InitialSync
+			if err := json.Unmarshal(message, &syncReq); err != nil {
+				log.Warn().Err(err).Msg("invalid initial_sync message")
+				continue
+			}
+			log.Info().
+				Bool("has_binary", syncReq.HasBinary).
+				Bool("has_model", syncReq.HasModel).
+				Str("role", syncReq.Role).
+				Str("fingerprint", wc.info.Fingerprint).
+				Msg("worker requesting initial sync")
+
+			if g.store == nil {
+				continue
+			}
+
+			// Push backend binary if worker doesn't have it and a version is configured.
+			if !syncReq.HasBinary {
+				if cfg, err := g.store.GetBackendVersionConfig(); err == nil && cfg.DownloadURL != "" {
+					downloadURL := backend.ExpandURL(cfg.DownloadURL, cfg.Version, wc.info.OS, wc.info.Arch)
+					fallbackURL := fmt.Sprintf("/v1/backend/download?version=%s&os=%s&arch=%s",
+						cfg.Version, wc.info.OS, wc.info.Arch)
+					if err := g.PushBackendUpdate(cfg.Version, downloadURL, fallbackURL, cfg.SHA256); err != nil {
+						log.Error().Err(err).Msg("initial_sync: failed to push backend update")
+					}
+				} else {
+					log.Info().Str("fingerprint", wc.info.Fingerprint[:8]).
+						Msg("initial_sync: no backend version configured, skipping")
+				}
+			}
+
+			// Push model update when: binary is missing (no running llama-server),
+			// model file is missing, or the LLM hash doesn't match.
+			// Always push when binary is absent — the model update triggers
+			// restartLLM which starts llama-server once the binary is installed.
+			if syncReq.Role != "" {
+				if rm, err := g.store.GetRoleModel(syncReq.Role); err == nil && rm != nil && rm.ModelFileHash != "" {
+					llmHash := protocol.ComputeLLMHash(syncReq.Role, rm.ModelFileHash)
+					var w store.Worker
+					workerHash := ""
+					if err2 := g.store.DB.Select("llm_hash").Where("fingerprint = ?", wc.info.Fingerprint).First(&w).Error; err2 == nil {
+						workerHash = w.LLMHash
+					}
+					needsModel := !syncReq.HasBinary || !syncReq.HasModel || workerHash != llmHash
+					if needsModel {
+						if err := g.PushModelUpdate(syncReq.Role, rm.LLMModel, rm.Quantisation,
+							rm.ModelFilename, rm.ModelFileHash, llmHash,
+							rm.ContextSize, rm.ParallelSlots, rm.GPULayers,
+							rm.EndpointType, rm.FlashAttention); err != nil {
+							log.Error().Err(err).Msg("initial_sync: failed to push model update")
+						}
+					}
+				} else {
+					log.Info().Str("role", syncReq.Role).Str("fingerprint", wc.info.Fingerprint[:8]).
+						Msg("initial_sync: no model configured for role, skipping")
+				}
 			}
 
 		default:

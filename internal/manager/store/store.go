@@ -751,6 +751,12 @@ func (s *Store) UpdateWorkerSyncStatus(fingerprint string) string {
 		}
 	}
 
+	log.Debug().
+		Str("fingerprint", fingerprint[:8]).
+		Str("worker_llm_hash", worker.LLMHash[:16]).
+		Str("preferred_role", role).
+		Int("roles_checked", len(allRoles)).
+		Msg("sync_status: no role hash matched worker LLM hash")
 	s.DB.Model(&Worker{}).Where("fingerprint = ?", fingerprint).Update("sync_status", "out-of-sync")
 	return "out-of-sync"
 }

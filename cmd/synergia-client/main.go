@@ -229,10 +229,20 @@ func main() {
 	conn.SetBackendHash(backendMgr.Hash())
 	defer backendMgr.Stop()
 
-	// Start llama-server immediately if the binary and model file are already on disk.
-	if backendMgr.IsInstalled() && cfg.ModelFile != "" {
+	// Log backend state so the operator can tell at a glance why llama-server
+	// is or isn't starting. Two independent conditions must both be true.
+	switch {
+	case !backendMgr.IsInstalled():
+		log.Info().Str("path", backendMgr.BinaryPath()).
+			Msg("backend: llama-server binary not installed — waiting for download from manager")
+	case cfg.ModelFile == "":
+		log.Info().Str("binary", backendMgr.BinaryPath()).
+			Msg("backend: binary ready but no model file configured — waiting for model update from manager")
+	default:
+		log.Info().Str("binary", backendMgr.BinaryPath()).Str("model", cfg.ModelFile).
+			Msg("backend: binary and model file present — starting llama-server")
 		if err := backendMgr.Start(llamaPort, cfg.ModelFile, backend.DefaultLlamaParams()); err != nil {
-			log.Warn().Err(err).Msg("failed to start llama-server — will start after first model update")
+			log.Warn().Err(err).Msg("backend: failed to start llama-server — will retry after next model update")
 		}
 	}
 
@@ -342,18 +352,19 @@ func main() {
 		}
 	}()
 
-	// Send initial "available" status once the first WebSocket connection is up.
-	// Without this the manager DB status stays "online" (set on handshake) and
-	// AggregatedStatus("online", ...) → "unavailable" until the first GPU state
-	// change or work unit completes — which may never happen at idle.
-	go func() {
-		select {
-		case <-conn.Connected():
-		case <-ctx.Done():
-			return
+	// On every successful (re)connection: if the install is incomplete send
+	// InitialSync so the manager pushes what's needed; otherwise send "available".
+	// SetOnConnect fires on each connect attempt (not just the first), so a failed
+	// TOFU challenge on the first attempt is handled correctly on retry.
+	conn.SetOnConnect(func() {
+		hasBinary := backendMgr.IsInstalled()
+		hasModel := cfg.ModelFile != ""
+		if !hasBinary || !hasModel {
+			_ = conn.SendInitialSync(hasBinary, hasModel, cfg.Role)
+		} else {
+			_ = conn.SendStatus("available")
 		}
-		_ = conn.SendStatus("available")
-	}()
+	})
 
 	// Start dashboard server
 	go srv.Run(ctx)

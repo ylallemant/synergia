@@ -67,6 +67,69 @@ func FetchTags(name string, limit int) ([]string, error) {
 	return result, nil
 }
 
+// ExpandURL expands a download URL template for the given version, OS, and arch.
+// Supported placeholders: {version}, {os}, {platform}, {arch}, {ext}.
+func ExpandURL(tpl, version, goos, goarch string) string {
+	platform := mapPlatform(goos)
+	arch := mapArch(goarch)
+	ext := mapExt(goos)
+	url := tpl
+	url = replaceAll(url, "{version}", version)
+	url = replaceAll(url, "{os}", goos)
+	url = replaceAll(url, "{platform}", platform)
+	url = replaceAll(url, "{arch}", arch)
+	url = replaceAll(url, "{ext}", ext)
+	return url
+}
+
+func mapPlatform(goos string) string {
+	switch goos {
+	case "darwin":
+		return "macos"
+	case "linux":
+		return "ubuntu"
+	case "windows":
+		return "win-cpu"
+	default:
+		return goos
+	}
+}
+
+func mapArch(goarch string) string {
+	switch goarch {
+	case "amd64":
+		return "x64"
+	default:
+		return goarch
+	}
+}
+
+func mapExt(goos string) string {
+	if goos == "windows" {
+		return "zip"
+	}
+	return "tar.gz"
+}
+
+func replaceAll(s, old, new string) string {
+	for {
+		i := indexOf(s, old)
+		if i < 0 {
+			return s
+		}
+		s = s[:i] + new + s[i+len(old):]
+	}
+}
+
+func indexOf(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
+}
+
 // IsValid returns true if the given name is a known backend.
 func IsValid(name string) bool {
 	for _, n := range Names {

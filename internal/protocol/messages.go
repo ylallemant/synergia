@@ -13,6 +13,7 @@ const (
 	TypeLLMHashReport = "llm_hash_report" // worker → manager: report current LLM hash
 	TypeBinaryUpdate  = "binary_update"   // manager → worker: new client binary available
 	TypeBackendUpdate = "backend_update"  // manager → worker: new backend binary available
+	TypeInitialSync   = "initial_sync"   // worker → manager: request backend+model push on fresh install
 )
 
 // Envelope is the top-level WebSocket message wrapper for type routing.
@@ -64,10 +65,11 @@ type Heartbeat struct {
 
 // Status is sent from worker to manager to report state changes.
 type Status struct {
-	Type    string `json:"type"`
-	State   string `json:"state"`              // "available", "processing", "busy", "updating", "paused", "withdrawn"
-	LLMHash string `json:"llm_hash,omitempty"` // worker's current LLM hash
-	GPUAvg  int    `json:"gpu_avg,omitempty"`  // rolling baseline mean (bottom-85th-pct), excl. peaks
+	Type        string `json:"type"`
+	State       string `json:"state"`                  // "available", "processing", "busy", "updating", "paused", "withdrawn"
+	LLMHash     string `json:"llm_hash,omitempty"`     // worker's current LLM hash
+	BackendHash string `json:"backend_hash,omitempty"` // SHA256 of the installed llama-server binary
+	GPUAvg      int    `json:"gpu_avg,omitempty"`      // rolling baseline mean (bottom-85th-pct), excl. peaks
 }
 
 // ModelUpdate is sent from manager to worker when a role-model mapping changes.
@@ -134,6 +136,16 @@ type ChatCompletionChoice struct {
 	Index        int         `json:"index"`
 	Message      ChatMessage `json:"message"`
 	FinishReason string      `json:"finish_reason"`
+}
+
+// InitialSync is sent by a fresh worker to request the manager push any
+// missing backend binary and/or model. The worker knows its own state
+// better than the manager and only sends this on a clean first start.
+type InitialSync struct {
+	Type      string `json:"type"`
+	HasBinary bool   `json:"has_binary"` // false → manager should push BackendUpdate
+	HasModel  bool   `json:"has_model"`  // false → manager should push ModelUpdate
+	Role      string `json:"role"`       // which role model to configure
 }
 
 type ChatCompletionUsage struct {

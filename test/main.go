@@ -1,8 +1,11 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -46,7 +49,6 @@ const (
 	managerAddr         = "127.0.0.1:7500"
 	managerAdminAddr    = "127.0.0.1:7501"
 	managerRedirectAddr = "127.0.0.1:7080"
-	llamaServerPort     = "8090"
 	apiKey              = "test-api-key"
 	workerKey           = "test-worker-key"
 	adminUser           = "admin"
@@ -203,7 +205,8 @@ func main() {
 	}
 
 	// Pre-flight: kill any stale processes holding required ports.
-	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, "127.0.0.1:" + llamaServerPort, "127.0.0.1:9876"} {
+	// 9877 is where the client will start its own llama-server.
+	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, "127.0.0.1:9877", "127.0.0.1:9876"} {
 		freePort(addr)
 	}
 
@@ -227,37 +230,39 @@ func main() {
 	pass("Model 1 file hash: %s...", model1FileHash[:16])
 	pass("Model 2 file hash: %s...", model2FileHash[:16])
 
-	// --- Step 2: Check llama-server availability ---
-	step("2. Checking llama-server availability")
+	// --- Step 2: Package llama-server binary for manager distribution ---
+	// The client downloads and starts its own llama-server (production behaviour).
+	// We package the system binary and serve it via a local HTTP server so the
+	// manager can push a BackendUpdate without a GitHub download.
+	step("2. Packaging llama-server binary for manager distribution")
 	llamaServerBin, err := exec.LookPath("llama-server")
 	if err != nil {
 		fatal("llama-server not found in PATH. Install llama.cpp first: brew install llama.cpp")
 	}
 	pass("llama-server found: %s", llamaServerBin)
 
-	// --- Step 3: Start llama-server ---
-	step("3. Starting llama-server")
-	llamaLogs := newLogBuffer("llama-server", logDir)
-	defer llamaLogs.Close()
-	llamaCmd := exec.Command(llamaServerBin,
-		"--model", modelPath,
-		"--port", llamaServerPort,
-		"--ctx-size", "2048",
-		"--n-gpu-layers", "99",
-	)
-	llamaCmd.Stdout = llamaLogs
-	llamaCmd.Stderr = llamaLogs
-	if err := llamaCmd.Start(); err != nil {
-		fatal("start llama-server: %v", err)
+	tarGzData, err := packageBinaryWithLibs(llamaServerBin)
+	if err != nil {
+		fatal("package llama-server binary: %v", err)
 	}
-	defer cleanup("llama-server", llamaCmd)
+	binaryLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fatal("binary distribution server: %v", err)
+	}
+	binaryServerURL := "http://" + binaryLn.Addr().String() + "/llama-server.tar.gz"
+	binaryMux := http.NewServeMux()
+	binaryMux.HandleFunc("/llama-server.tar.gz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Length", strconv.Itoa(len(tarGzData)))
+		w.Write(tarGzData) //nolint:errcheck
+	})
+	binarySrv := &http.Server{Handler: binaryMux}
+	go binarySrv.Serve(binaryLn) //nolint:errcheck
+	defer binarySrv.Close()
+	pass("binary distribution server ready: %s", binaryServerURL)
 
-	// Wait for llama-server to be ready
-	if err := waitForHTTP("http://127.0.0.1:"+llamaServerPort+"/health", 30*time.Second); err != nil {
-		llamaLogs.Dump(os.Stderr)
-		fatal("llama-server did not become ready: %v", err)
-	}
-	pass("llama-server ready on port %s", llamaServerPort)
+	// --- Step 3: (client manages its own llama-server — no external process) ---
+	step("3. llama-server will be started by the client after binary/model push")
 
 	// --- Step 4: Start cluster-manager ---
 	step("4. Starting cluster-manager")
@@ -272,7 +277,8 @@ func main() {
 		"CLUSTER_MODEL_BACKEND=filesystem",
 		"CLUSTER_MODEL_PATH="+modelsDir,
 		"CLUSTER_DB_PATH="+filepath.Join(dataDir, "cluster-manager.db"),
-		"CLUSTER_TEST_SETUP=true",
+		"CLUSTER_DEV_BACKEND_URL="+binaryServerURL,
+		"CLUSTER_DEV_CLIENT_VERSION=0.1.0-dev",
 		"CLUSTER_ADMIN_ADDR="+managerAdminAddr,
 		"CLUSTER_ADMIN_USER="+adminUser,
 		"CLUSTER_ADMIN_PASSWORD="+adminPassword,
@@ -333,11 +339,11 @@ func main() {
 	defer clientLogs.Close()
 	clientCmd := exec.Command("go", "run", "./cmd/synergia-client",
 		"--manager-url", "wss://"+managerAddr+"/ws/worker",
-		"--llm-url", "http://127.0.0.1:"+llamaServerPort,
+		// no --llm-url: client manages its own llama-server on port 9877
 		"--model", testModelName,
 		"--quantisation", testQuantisation,
 		"--role", "embedding",
-		"--model-file", modelPath,
+		"--model-file", modelPath, // sets the models directory for downloads
 		"--data-dir", clientDataDir,
 		"--auto-approve",
 		"--tls-ca-cert", caCertPath,
@@ -374,6 +380,17 @@ func main() {
 	}
 	pass("Client confirms connection")
 
+	// --- Step 7a: Wait for client InitialSync to complete ---
+	// The client detected a clean install (no binary, no model) and sent an
+	// InitialSync message. The manager responded with BackendUpdate + ModelUpdate
+	// using the pre-configured development backend URL and role model.
+	step("7a. Waiting for client InitialSync bootstrap (binary + model + llama-server)")
+	if err := waitForLog(clientLogs, "backend: llama-server process started", 120*time.Second); err != nil {
+		clientLogs.Dump(os.Stderr)
+		fatal("client did not start llama-server via InitialSync: %v", err)
+	}
+	pass("Client started llama-server via InitialSync")
+
 	// --- Step 7b: TOFU challenge-response handshake ---
 	step("7b. Testing TOFU challenge-response worker authentication")
 	{
@@ -396,7 +413,6 @@ func main() {
 			"CLUSTER_MODEL_BACKEND=filesystem",
 			"CLUSTER_MODEL_PATH="+modelsDir,
 			"CLUSTER_DB_PATH="+filepath.Join(dataDir, "tofu-manager.db"),
-			"CLUSTER_TEST_SETUP=true",
 			"CLUSTER_ADMIN_ADDR="+tofuManagerAdminAddr,
 			"TLS_CERT_FILE="+serverCertPath,
 			"TLS_KEY_FILE="+serverKeyPath,
@@ -422,7 +438,7 @@ func main() {
 		defer tofuClientLogs.Close()
 		tofuClientCmd := exec.Command("go", "run", "./cmd/synergia-client",
 			"--manager-url", "wss://"+tofuManagerAddr+"/ws/worker",
-			"--llm-url", "http://127.0.0.1:"+llamaServerPort,
+			// no --llm-url: TOFU test is auth-only; client probes default port 9877
 			"--model", testModelName,
 			"--quantisation", testQuantisation,
 			"--role", "tester",
@@ -481,6 +497,14 @@ func main() {
 		}
 		pass("TOFU worker registered with manager")
 	}
+
+	// Wait for the main client's llama-server to be healthy before sending completions.
+	// The TOFU test ran concurrently with llama-server loading, so it may still be starting up.
+	if err := waitForHTTP("http://127.0.0.1:9877/health", 120*time.Second); err != nil {
+		clientLogs.Dump(os.Stderr)
+		fatal("llama-server not ready on port 9877: %v", err)
+	}
+	pass("llama-server ready on port 9877")
 
 	// --- Step 8: Check worker appears in API ---
 	step("8. Verifying worker in cluster API")
@@ -769,8 +793,17 @@ func main() {
 		}
 		pass("PAUSE trigger sent — client should now be unpaused")
 
-		// Wait for batch processing
-		time.Sleep(5 * time.Second)
+		// Wait for the worker to become genuinely available again (GPU cool-down,
+		// llama-server healthy, not just unpaused). Polling the API avoids
+		// sending a work unit to a worker that is still in busy/paused transition.
+		waitDeadline := time.Now().Add(60 * time.Second)
+		for time.Now().Before(waitDeadline) {
+			if wr, apiErr := apiGet("https://"+managerAddr+"/v1/workers", apiKey); apiErr == nil &&
+				strings.Contains(wr, `"status":"available"`) {
+				break
+			}
+			time.Sleep(2 * time.Second)
+		}
 
 		// 14e: Verify the batch request completed
 		batchStatus, batchPollErr := pollBatchRequest("https://"+managerAddr+"/v1/batches", apiKey, batchID, 30*time.Second)
@@ -1089,16 +1122,39 @@ func main() {
 			}
 			pass("Client downloaded and installed llama-server b9049")
 
+			// Wait for the client to restart llama-server with the new binary (2nd start overall).
+			if err := waitForLogN(clientLogs, "backend: llama-server process started", 2, 120*time.Second); err != nil {
+				fatal("llama-server did not restart after b9049 upgrade: %v", err)
+			}
+			if err := waitForHTTP("http://127.0.0.1:9877/health", 120*time.Second); err != nil {
+				fatal("llama-server not ready after b9049 upgrade: %v", err)
+			}
+			pass("llama-server restarted and ready with b9049")
+
 			// Verify the installed binary works
 			backendBin := filepath.Join(dataDir, "client-data", "backend", "llama-server")
 			if runtime.GOOS == "windows" {
 				backendBin += ".exe"
 			}
-			versionOut, err := exec.Command(backendBin, "--version").CombinedOutput()
-			if err != nil {
+			verCtx, verCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			verCmd := exec.CommandContext(verCtx, backendBin, "--version")
+			defer verCancel()
+			// Include the binary's directory in DYLD_LIBRARY_PATH/LD_LIBRARY_PATH so
+			// shared libs extracted alongside the binary (from the release archive) are found.
+			binDir := filepath.Dir(backendBin)
+			verCmd.Env = append(os.Environ(),
+				"DYLD_LIBRARY_PATH="+binDir+":"+os.Getenv("DYLD_LIBRARY_PATH"),
+				"LD_LIBRARY_PATH="+binDir+":"+os.Getenv("LD_LIBRARY_PATH"),
+			)
+			versionOut, err := verCmd.CombinedOutput()
+			if err != nil && verCtx.Err() == nil {
 				fatal("backend binary verification failed: %v (output: %s)", err, string(versionOut))
 			}
-			pass("Backend binary verified: %s", strings.TrimSpace(string(versionOut)))
+			if verCtx.Err() != nil {
+				pass("Backend binary installed (version check timed out — binary starts via health check)")
+			} else {
+				pass("Backend binary verified: %s", strings.TrimSpace(string(versionOut)))
+			}
 
 			// GET the config back
 			backendGetResp, err := apiGet("https://"+managerAdminAddr+"/v1/admin/backend", apiKey)
@@ -1130,6 +1186,15 @@ func main() {
 				fatal("backend upgrade to b9050 failed: %v", err)
 			}
 			pass("Client upgraded backend to b9050")
+
+			// Wait for llama-server to restart with b9050 (3rd start overall).
+			if err := waitForLogN(clientLogs, "backend: llama-server process started", 3, 120*time.Second); err != nil {
+				fatal("llama-server did not restart after b9050 upgrade: %v", err)
+			}
+			if err := waitForHTTP("http://127.0.0.1:9877/health", 120*time.Second); err != nil {
+				fatal("llama-server not ready after b9050 upgrade: %v", err)
+			}
+			pass("llama-server restarted and ready with b9050")
 		}
 	}
 
@@ -1856,9 +1921,80 @@ func querySQLiteString(dbPath, query string) string {
 	return strings.TrimSpace(string(output))
 }
 
-// runServices starts llama-server, cluster-manager, and cluster-client in
-// development mode without running any tests. If any process exits, the
-// others are stopped.
+// packageBinaryWithLibs creates a flat tar.gz that contains the binary and any
+// shared-library files (.dylib / .so) found in the sibling lib/ directory of
+// the resolved binary path. This mirrors real llama.cpp release archives, which
+// bundle the binary together with its shared libraries so they can all be
+// extracted into a single directory and found via @loader_path/.
+func packageBinaryWithLibs(llamaBin string) ([]byte, error) {
+	// Resolve symlinks so we can find the real installation tree.
+	realBin, err := filepath.EvalSymlinks(llamaBin)
+	if err != nil {
+		realBin = llamaBin
+	}
+
+	// Sibling lib/ directory — present in both Homebrew cellar and real releases.
+	libDir := filepath.Join(filepath.Dir(filepath.Dir(realBin)), "lib")
+
+	addFile := func(tw *tar.Writer, srcPath, entryName string) error {
+		// Follow symlinks for the actual file content.
+		realPath, _ := filepath.EvalSymlinks(srcPath)
+		if realPath == "" {
+			realPath = srcPath
+		}
+		info, err := os.Stat(realPath)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(realPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		hdr := &tar.Header{
+			Name:    entryName,
+			Mode:    0755,
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		_, err = io.Copy(tw, f)
+		return err
+	}
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+
+	if err := addFile(tw, realBin, "llama-server"); err != nil {
+		return nil, fmt.Errorf("package binary: %w", err)
+	}
+
+	// Include every .dylib / .so from the lib/ directory if it exists.
+	if entries, err := os.ReadDir(libDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if !strings.HasSuffix(name, ".dylib") && !strings.HasSuffix(name, ".so") {
+				continue
+			}
+			_ = addFile(tw, filepath.Join(libDir, name), name) // best-effort
+		}
+	}
+
+	tw.Close()
+	gw.Close()
+	return buf.Bytes(), nil
+}
+
+// runServices starts cluster-manager and cluster-client in development mode
+// without running any tests. The client manages its own llama-server binary
+// (downloaded from the manager on first connect), mirroring the production
+// first-start flow. If any process exits, the others are stopped.
 func runServices() {
 	initLogger()
 
@@ -1880,7 +2016,8 @@ func runServices() {
 	cleanupOldRuns(filepath.Join(testDir, "runs"), 3)
 
 	// Pre-flight: kill any stale processes holding required ports.
-	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, "127.0.0.1:" + llamaServerPort, "127.0.0.1:9876"} {
+	// 9877 is the port the client uses for its own llama-server process.
+	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, "127.0.0.1:9877", "127.0.0.1:9876"} {
 		freePort(addr)
 	}
 
@@ -1907,38 +2044,41 @@ func runServices() {
 		TLSClientConfig: &tls.Config{RootCAs: caPool},
 	}
 
-	// Ensure model
+	// Ensure model file is available in testdata
 	modelPath := filepath.Join(modelsDir, testModelFilename)
 	if err := ensureModel(modelPath); err != nil {
 		fatal("model download: %v", err)
 	}
 
-	// Find llama-server
+	// Find the system llama-server binary and package it as a tar.gz so the
+	// manager can distribute it to the client — matching the production flow.
 	llamaServerBin, err := exec.LookPath("llama-server")
 	if err != nil {
-		fatal("llama-server not found in PATH")
+		fatal("llama-server not found in PATH — install llama.cpp first: brew install llama.cpp")
+	}
+	log.Info().Str("path", llamaServerBin).Msg("packaging llama-server binary for distribution")
+
+	tarGzData, err := packageBinaryWithLibs(llamaServerBin)
+	if err != nil {
+		fatal("package llama-server binary: %v", err)
 	}
 
-	// --- Start llama-server ---
-	llamaLogs := newLogBuffer("llama-server", logDir)
-	defer llamaLogs.Close()
-	llamaCmd := exec.Command(llamaServerBin,
-		"--model", modelPath,
-		"--port", llamaServerPort,
-		"--ctx-size", "2048",
-		"--n-gpu-layers", "99",
-	)
-	llamaCmd.Stdout = llamaLogs
-	llamaCmd.Stderr = llamaLogs
-	if err := llamaCmd.Start(); err != nil {
-		fatal("start llama-server: %v", err)
+	// Serve the tar.gz from an in-process HTTP server on an ephemeral port.
+	binaryLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fatal("binary distribution server: %v", err)
 	}
-
-	if err := waitForHTTP("http://127.0.0.1:"+llamaServerPort+"/health", 30*time.Second); err != nil {
-		llamaLogs.Dump(os.Stderr)
-		fatal("llama-server did not become ready: %v", err)
-	}
-	log.Info().Str("port", llamaServerPort).Msg("llama-server ready")
+	binaryServerURL := "http://" + binaryLn.Addr().String() + "/llama-server.tar.gz"
+	binaryMux := http.NewServeMux()
+	binaryMux.HandleFunc("/llama-server.tar.gz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Length", strconv.Itoa(len(tarGzData)))
+		w.Write(tarGzData) //nolint:errcheck
+	})
+	binarySrv := &http.Server{Handler: binaryMux}
+	go binarySrv.Serve(binaryLn) //nolint:errcheck
+	defer binarySrv.Close()
+	log.Info().Str("url", binaryServerURL).Msg("binary distribution server ready")
 
 	// --- Start cluster-manager ---
 	managerLogs := newLogBuffer("cluster-manager", logDir)
@@ -1952,7 +2092,8 @@ func runServices() {
 		"CLUSTER_MODEL_BACKEND=filesystem",
 		"CLUSTER_MODEL_PATH="+modelsDir,
 		"CLUSTER_DB_PATH="+filepath.Join(dataDir, "cluster-manager.db"),
-		"CLUSTER_TEST_SETUP=true",
+		"CLUSTER_DEV_BACKEND_URL="+binaryServerURL,
+		"CLUSTER_DEV_CLIENT_VERSION=0.1.0-dev",
 		"CLUSTER_ADMIN_ADDR="+managerAdminAddr,
 		"CLUSTER_ADMIN_USER="+adminUser,
 		"CLUSTER_ADMIN_PASSWORD="+adminPassword,
@@ -1973,17 +2114,19 @@ func runServices() {
 	}
 	log.Info().Str("addr", managerAddr).Msg("cluster-manager ready")
 
-	// --- Start cluster-client ---
+	// --- Start cluster-client (clean directory — no binary, no cached state) ---
+	// The client will download and start its own llama-server on port 9877,
+	// exactly as it would on a real first-run installation.
 	clientDataDir := filepath.Join(dataDir, "client-data")
 	clientLogs := newLogBuffer("cluster-client", logDir)
 	defer clientLogs.Close()
 	clientCmd := exec.Command("go", "run", "./cmd/synergia-client",
 		"--manager-url", "wss://"+managerAddr+"/ws/worker",
-		"--llm-url", "http://127.0.0.1:"+llamaServerPort,
+		// no --llm-url: client uses its default (localhost:9877) and manages the process itself
 		"--model", testModelName,
 		"--quantisation", testQuantisation,
 		"--role", "tester",
-		"--model-file", modelPath,
+		"--model-file", modelPath, // sets the models directory; file already exists so no download needed
 		"--data-dir", clientDataDir,
 		"--auto-approve",
 		"--tls-ca-cert", caCertPath,
@@ -1997,18 +2140,29 @@ func runServices() {
 	}
 
 	log.Info().Msg("")
-	log.Info().Msg("All services started in development mode (no tests)")
+	log.Info().Msg("All services started — bootstrapping client (binary download → model push → llama-server start)")
 	log.Info().Msgf("  Client Dashboard: http://127.0.0.1:9876/static/index.html")
 	log.Info().Msgf("  Admin Dashboard:  https://%s/login  (user: %s / pass: %s)", managerAdminAddr, adminUser, adminPassword)
 	log.Info().Msgf("  Manager API:      https://%s", managerAddr)
 	log.Info().Msg("  Press Ctrl+C or use tray → Quit to stop")
 	log.Info().Msg("")
 
-	// Wait for client to register before sending payloads
-	if err := waitForHTTP("https://"+managerAddr+"/healthz", 10*time.Second); err != nil {
-		log.Warn().Msg("manager health check failed, payloads may not work")
+	// The manager was pre-configured with the local binary URL and client version
+	// target at startup. When the client connects and sends InitialSync, the manager
+	// immediately pushes BackendUpdate + ModelUpdate. Just wait for the result.
+	if err := waitForLog(managerLogs, "worker connected", 30*time.Second); err != nil {
+		fatal("client did not connect to manager: %v", err)
 	}
-	time.Sleep(3 * time.Second) // give client time to connect
+	log.Info().Msg("worker connected — waiting for InitialSync bootstrap")
+
+	if err := waitForLog(clientLogs, "backend: llama-server process started", 120*time.Second); err != nil {
+		clientLogs.Dump(os.Stderr)
+		fatal("client did not start llama-server via InitialSync: %v", err)
+	}
+	if err := waitForHTTP("http://127.0.0.1:9877/health", 120*time.Second); err != nil {
+		fatal("llama-server not ready on port 9877: %v", err)
+	}
+	log.Info().Msg("llama-server started and ready on port 9877")
 
 	// Background payload sender
 	stop := make(chan struct{})
@@ -2085,9 +2239,6 @@ func runServices() {
 	managerDone := make(chan struct{})
 	go func() { managerCmd.Wait(); close(managerDone) }()
 
-	llamaDone := make(chan struct{})
-	go func() { llamaCmd.Wait(); close(llamaDone) }()
-
 	select {
 	case <-sigCh:
 		log.Info().Msg("signal received, shutting down gracefully...")
@@ -2095,8 +2246,6 @@ func runServices() {
 		log.Info().Msg("client exited, shutting down...")
 	case <-managerDone:
 		log.Info().Msg("manager exited, shutting down...")
-	case <-llamaDone:
-		log.Info().Msg("llama-server exited, shutting down...")
 	}
 
 	close(stop)
@@ -2104,7 +2253,6 @@ func runServices() {
 	// Graceful shutdown: stop each service in order
 	cleanup("cluster-client", clientCmd)
 	cleanup("cluster-manager", managerCmd)
-	cleanup("llama-server", llamaCmd)
 
 	log.Info().Msg("all services stopped")
 	os.Exit(0)
