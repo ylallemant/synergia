@@ -9,7 +9,7 @@
 <body>
 
 <nav class="top-nav">
-  <a class="nav-brand" href="/">Synergia Administration <span style="font-weight:400">v{{.ManagerVersion}}</span></a>
+  <a class="nav-brand" href="/">Synergia Administration <span id="navManagerVersion" style="font-weight:400">v{{.ManagerVersion}}</span></a>
   <button class="nav-burger" id="navToggle" aria-label="Open menu">
     <span></span><span></span><span></span>
   </button>
@@ -97,12 +97,12 @@
 <div class="footer">Generated at {{.GeneratedAt}}</div>
 
 <script>
-// --- Nav ---
-function openNav()  { document.getElementById("navPanel").classList.add("open");  document.getElementById("navOverlay").classList.add("show"); }
-function closeNav() { document.getElementById("navPanel").classList.remove("open"); document.getElementById("navOverlay").classList.remove("show"); }
-document.getElementById("navToggle").addEventListener("click", openNav);
-document.getElementById("navClose").addEventListener("click", closeNav);
-document.getElementById("navOverlay").addEventListener("click", closeNav);
+const API_KEY = "{{.APIKey}}";
+const MANAGER_VERSION = "{{.ManagerVersion}}";
+const headers = {"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"};
+</script>
+<script src="/static/admin.js"></script>
+<script>
 
 // Poll live stats every 2 seconds without full page reload
 setInterval(async () => {

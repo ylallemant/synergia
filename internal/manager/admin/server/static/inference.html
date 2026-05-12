@@ -9,7 +9,7 @@
 <body>
 
 <nav class="top-nav">
-  <a class="nav-brand" href="/">Synergia Administration <span style="font-weight:400">v{{.ManagerVersion}}</span></a>
+  <a class="nav-brand" href="/">Synergia Administration <span id="navManagerVersion" style="font-weight:400">v{{.ManagerVersion}}</span></a>
   <button class="nav-burger" id="navToggle" aria-label="Open menu">
     <span></span><span></span><span></span>
   </button>
@@ -143,7 +143,11 @@
 
 <script>
 const API_KEY = "{{.APIKey}}";
+const MANAGER_VERSION = "{{.ManagerVersion}}";
 const headers = {"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"};
+</script>
+<script src="/static/admin.js"></script>
+<script>
 
 // ── API Key ────────────────────────────────────────────────────────────────
 document.getElementById("apiKeyInput").value = API_KEY;
@@ -174,63 +178,28 @@ document.getElementById("saveKeyBtn").addEventListener("click", async () => {
   } catch(e) { s.textContent = "Network error: " + e.message; s.className = "status-msg err"; }
 });
 
-// --- Nav ---
-function openNav()  { document.getElementById("navPanel").classList.add("open");  document.getElementById("navOverlay").classList.add("show"); }
-function closeNav() { document.getElementById("navPanel").classList.remove("open"); document.getElementById("navOverlay").classList.remove("show"); }
-document.getElementById("navToggle").addEventListener("click", openNav);
-document.getElementById("navClose").addEventListener("click", closeNav);
-document.getElementById("navOverlay").addEventListener("click", closeNav);
 
-function showStatus(el, msg, ok) {
-  el.textContent = msg;
-  el.className = "status-msg " + (ok ? "ok" : "err");
-  setTimeout(() => { el.textContent = ""; el.className = "status-msg"; }, 5000);
-}
 
 // ── Backend ────────────────────────────────────────────────────────────────
-let _storedBackendVersion = "";
-
+// loadBackendConfig fetches only the form-control fields (name, sha256).
+// Version dropdown population and hint/stats are driven by admin.js state.
 async function loadBackendConfig() {
   try {
     const resp = await fetch("/v1/admin/backend", {headers});
     if (!resp.ok) return;
     const cfg = await resp.json();
-    if (cfg.name) document.getElementById("be_name").value = cfg.name;
-    if (cfg.version) {
-      _storedBackendVersion = cfg.version;
-      document.getElementById("be_version").innerHTML =
-        `<option value="${cfg.version}" selected>${cfg.version}</option>`;
-    }
-    if (cfg.sha256) document.getElementById("be_sha").value = cfg.sha256;
+    if (cfg.name)   document.getElementById("be_name").value = cfg.name;
+    if (cfg.sha256) document.getElementById("be_sha").value  = cfg.sha256;
   } catch(e) { console.error("Failed to load backend config:", e); }
-  // Chain: fetch tags only after stored version is known, so it can be pre-selected.
   await refreshBackendTags();
 }
 
-async function loadSyncStats() {
-  try {
-    const resp = await fetch("/v1/admin/stats", {headers});
-    if (!resp.ok) return;
-    const s = await resp.json();
-    if (s.backend_version) {
-      document.getElementById("backendSyncGrid").style.display = "";
-      document.getElementById("backendSyncNoTarget").style.display = "none";
-      document.getElementById("beSynced").textContent = s.backend_synced;
-      document.getElementById("beOutdated").textContent = s.backend_outdated;
-    } else {
-      document.getElementById("backendSyncGrid").style.display = "none";
-      document.getElementById("backendSyncNoTarget").style.display = "";
-    }
-  } catch(e) { console.error("Failed to load sync stats:", e); }
-}
-loadSyncStats();
-setInterval(loadSyncStats, 30000);
-
 async function refreshBackendTags() {
   const name = document.getElementById("be_name").value;
-  const btn = document.getElementById("refreshTagsBtn");
-  const sel = document.getElementById("be_version");
-  const currentVal = _storedBackendVersion || sel.value;
+  const btn  = document.getElementById("refreshTagsBtn");
+  const sel  = document.getElementById("be_version");
+  // Use stored backend version from shared state as the pre-select anchor
+  const stored = getVersionState()?.backend?.version || "";
   btn.disabled = true; btn.textContent = "…";
   try {
     const resp = await fetch("/v1/admin/backend/tags?name=" + encodeURIComponent(name), {headers});
@@ -238,43 +207,40 @@ async function refreshBackendTags() {
     const data = await resp.json();
     sel.innerHTML = "";
     if (data.tags && data.tags.length > 0) {
+      // If the stored version is not in the release list (e.g. "local"),
+      // prepend it so it appears selected as the current value.
+      if (stored && !data.tags.includes(stored)) {
+        const cur = document.createElement("option");
+        cur.value = stored; cur.textContent = stored + " (current)";
+        cur.selected = true;
+        sel.appendChild(cur);
+      }
       for (const tag of data.tags) {
         const opt = document.createElement("option");
         opt.value = tag; opt.textContent = tag;
-        if (tag === currentVal) opt.selected = true;
+        if (tag === stored) opt.selected = true;
         sel.appendChild(opt);
-      }
-      // Show hint if stored version is behind the latest available tag.
-      const hint = document.getElementById("beNewerHint");
-      if (hint) {
-        if (currentVal && data.tags[0] !== currentVal) {
-          hint.textContent = "Newer version available: " + data.tags[0];
-          hint.style.display = "";
-        } else {
-          hint.style.display = "none";
-        }
       }
     } else { sel.innerHTML = '<option value="">(no tags found)</option>'; }
   } catch(err) { btn.title = "Error: " + err.message; }
   finally { btn.disabled = false; btn.textContent = "↻"; }
   updateReleaseLink();
+  // Refresh state so hint + stats reflect the latest tags
+  refreshVersionState();
 }
 
 const releaseURLs = { "llama.cpp": "https://github.com/ggml-org/llama.cpp/releases/tag/" };
 
 function updateReleaseLink() {
-  const name = document.getElementById("be_name").value;
+  const name    = document.getElementById("be_name").value;
   const version = document.getElementById("be_version").value;
-  const link = document.getElementById("releaseLink");
-  const base = releaseURLs[name];
+  const link    = document.getElementById("releaseLink");
+  const base    = releaseURLs[name];
   if (base && version) { link.href = base + encodeURIComponent(version); link.style.display = ""; }
   else { link.removeAttribute("href"); link.style.display = "none"; }
 }
 
-document.getElementById("refreshTagsBtn").addEventListener("click", () => {
-  _storedBackendVersion = document.getElementById("be_version").value;
-  refreshBackendTags();
-});
+document.getElementById("refreshTagsBtn").addEventListener("click", refreshBackendTags);
 document.getElementById("be_name").addEventListener("change", refreshBackendTags);
 document.getElementById("be_version").addEventListener("change", updateReleaseLink);
 loadBackendConfig();
@@ -283,15 +249,18 @@ document.getElementById("backendForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const status = document.getElementById("backendStatus");
   const body = {
-    name: document.getElementById("be_name").value,
+    name:    document.getElementById("be_name").value,
     version: document.getElementById("be_version").value,
-    sha256: document.getElementById("be_sha").value
+    sha256:  document.getElementById("be_sha").value
   };
   if (!body.version) { showStatus(status, "Please select a version", false); return; }
   try {
     const resp = await fetch("/v1/admin/backend", {method: "POST", headers, body: JSON.stringify(body)});
-    if (resp.ok) { showStatus(status, "Applied ✓", true); }
-    else { showStatus(status, "Error: " + resp.status + " " + await resp.text(), false); }
+    if (resp.ok) {
+      showStatus(status, "Applied ✓", true);
+      // Invalidate state so hint + stats reflect the new stored version immediately
+      refreshVersionState();
+    } else { showStatus(status, "Error: " + resp.status + " " + await resp.text(), false); }
   } catch(err) { showStatus(status, "Network error: " + err.message, false); }
 });
 

@@ -425,7 +425,9 @@ func main() {
 	adminWorkersAPI := adminapi.NewAdminWorkersAPI(db, gw)
 	adminServer.HandleFuncAdmin("/v1/admin/workers", adminWorkersAPI.ConfigHandler)
 	adminStatsAPI := adminapi.NewAdminStatsAPI(adminCache)
+	adminStatsAPI.SetManagerVersion(version)
 	adminServer.HandleFuncAdmin("/v1/admin/stats", adminStatsAPI.StatsHandler)
+	adminServer.HandleFuncAdmin("/v1/admin/versions/status", adminStatsAPI.VersionsStatusHandler)
 	adminAPIKeyAPI := adminapi.NewAdminAPIKeyAPI(db, adminServer.SetAPIKey)
 	adminServer.HandleFuncAdmin("/v1/admin/apikey", adminAPIKeyAPI.AdminAPIKeyHandler)
 

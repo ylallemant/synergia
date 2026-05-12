@@ -30,7 +30,7 @@
 <body>
 
 <nav class="top-nav">
-  <a class="nav-brand" href="/">Synergia Administration <span style="font-weight:400">v{{.ManagerVersion}}</span></a>
+  <a class="nav-brand" href="/">Synergia Administration <span id="navManagerVersion" style="font-weight:400">v{{.ManagerVersion}}</span></a>
   <button class="nav-burger" id="navToggle" aria-label="Open menu">
     <span></span><span></span><span></span>
   </button>
@@ -193,16 +193,10 @@ es.onmessage = e => append(e.data);
 </script>
 
 <script>
-// Nav panel toggle (same as other admin pages)
-const navToggle  = document.getElementById('navToggle');
-const navPanel   = document.getElementById('navPanel');
-const navOverlay = document.getElementById('navOverlay');
-const navClose   = document.getElementById('navClose');
-function openNav()  { navPanel.classList.add('open'); navOverlay.classList.add('open'); }
-function closeNav() { navPanel.classList.remove('open'); navOverlay.classList.remove('open'); }
-navToggle.addEventListener('click', openNav);
-navClose.addEventListener('click', closeNav);
-navOverlay.addEventListener('click', closeNav);
+const API_KEY = "{{.APIKey}}";
+const MANAGER_VERSION = "{{.ManagerVersion}}";
+const headers = {"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"};
 </script>
+<script src="/static/admin.js"></script>
 </body>
 </html>

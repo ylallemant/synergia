@@ -9,7 +9,7 @@
 <body>
 
 <nav class="top-nav">
-  <a class="nav-brand" href="/">Synergia Administration <span style="font-weight:400">v{{.ManagerVersion}}</span></a>
+  <a class="nav-brand" href="/">Synergia Administration <span id="navManagerVersion" style="font-weight:400">v{{.ManagerVersion}}</span></a>
   <button class="nav-burger" id="navToggle" aria-label="Open menu">
     <span></span><span></span><span></span>
   </button>
@@ -75,10 +75,13 @@
   <form id="versionForm" class="admin-form">
     <div class="form-row">
       <label for="ver_target">Target Version</label>
-      <div class="input-with-btn">
-        <select id="ver_target" name="target_version"></select>
-        <button type="button" id="refreshClientTagsBtn" class="btn-small" title="Refresh tags from GitHub">↻</button>
-        <a id="clientReleaseLink" class="btn-small" target="_blank" rel="noopener" title="Open release page" style="display:none">↗</a>
+      <div style="display:flex;flex-direction:column;gap:0.25rem;flex:1;min-width:0">
+        <div class="input-with-btn">
+          <select id="ver_target" name="target_version"></select>
+          <button type="button" id="refreshClientTagsBtn" class="btn-small" title="Refresh tags from GitHub">↻</button>
+          <a id="clientReleaseLink" class="btn-small" target="_blank" rel="noopener" title="Open release page" style="display:none">↗</a>
+        </div>
+        <span id="verNewerHint" class="section-hint" style="display:none;color:#ca8a04"></span>
       </div>
     </div>
     <div class="form-row">
@@ -102,8 +105,8 @@
     </div>
   </form>
   <div id="versionSyncSection" style="margin-top:0.75rem">
-    <div id="versionSyncNoTarget" class="notice notice-info" style="display:none">
-      No target version configured — set one above and push to start tracking client sync.
+    <div id="versionSyncNoTarget" class="notice notice-warn" style="display:none">
+      No target version configured — workers cannot auto-update. Set one above and push.
     </div>
     <div id="versionSyncGrid" class="grid sync-grid" style="display:none">
       <div class="card"><div class="label">Synced</div><div class="value green" id="verSynced">0</div></div>
@@ -116,20 +119,13 @@
 
 <script>
 const API_KEY = "{{.APIKey}}";
+const MANAGER_VERSION = "{{.ManagerVersion}}";
 const headers = {"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"};
+</script>
+<script src="/static/admin.js"></script>
+<script>
 
-// --- Nav ---
-function openNav()  { document.getElementById("navPanel").classList.add("open");  document.getElementById("navOverlay").classList.add("show"); }
-function closeNav() { document.getElementById("navPanel").classList.remove("open"); document.getElementById("navOverlay").classList.remove("show"); }
-document.getElementById("navToggle").addEventListener("click", openNav);
-document.getElementById("navClose").addEventListener("click", closeNav);
-document.getElementById("navOverlay").addEventListener("click", closeNav);
 
-function showStatus(el, msg, ok) {
-  el.textContent = msg;
-  el.className = "status-msg " + (ok ? "ok" : "err");
-  setTimeout(() => { el.textContent = ""; el.className = "status-msg"; }, 5000);
-}
 
 // ── Auth config ────────────────────────────────────────────────────────────
 document.getElementById("toggleWorkerKey").addEventListener("click", () => {
@@ -178,55 +174,25 @@ document.getElementById("workersForm").addEventListener("submit", async (e) => {
 });
 
 // ── Client version ─────────────────────────────────────────────────────────
+// loadVersionConfig fetches only the form-control fields (rollout mode, sha256).
+// Version dropdown population and hint/stats are driven by admin.js state.
 async function loadVersionConfig() {
   try {
     const resp = await fetch("/v1/admin/version", {headers});
     if (!resp.ok) return;
     const cfg = await resp.json();
-    if (cfg.target_version) {
-      const sel = document.getElementById("ver_target");
-      sel.innerHTML = `<option value="${cfg.target_version}" selected>${cfg.target_version}</option>`;
-    }
-    if (cfg.rollout_mode) {
-      document.getElementById("ver_rollout").value = cfg.rollout_mode;
-    }
-    if (cfg.rollout_percentage) {
-      document.getElementById("ver_pct").value = cfg.rollout_percentage;
-    }
+    if (cfg.rollout_mode)       document.getElementById("ver_rollout").value = cfg.rollout_mode;
+    if (cfg.rollout_percentage) document.getElementById("ver_pct").value     = cfg.rollout_percentage;
+    if (cfg.sha256)             document.getElementById("ver_sha").value     = cfg.sha256;
   } catch(e) { console.error("Failed to load version config:", e); }
+  await refreshClientTags();
 }
-loadVersionConfig();
-
-async function loadSyncStats() {
-  try {
-    const resp = await fetch("/v1/admin/stats", {headers});
-    if (!resp.ok) return;
-    const s = await resp.json();
-    if (s.version_target) {
-      document.getElementById("versionSyncGrid").style.display = "";
-      document.getElementById("versionSyncNoTarget").style.display = "none";
-      document.getElementById("verSynced").textContent = s.workers_synced;
-      document.getElementById("verOutdated").textContent = s.workers_outdated;
-    } else {
-      document.getElementById("versionSyncGrid").style.display = "none";
-      const notice = document.getElementById("versionSyncNoTarget");
-      notice.style.display = "";
-      // If a version is already selected in the dropdown, clarify that it has
-      // not been saved yet — the dropdown is pre-filled from GitHub tags but
-      // nothing is active until the admin presses Save & Push.
-      const selected = document.getElementById("ver_target").value;
-      notice.textContent = selected
-        ? `"${selected}" is selected but not yet saved — click Save & Push to set it as the target and start tracking client sync.`
-        : "No target version configured — set one above and push to start tracking client sync.";
-    }
-  } catch(e) { console.error("Failed to load sync stats:", e); }
-}
-loadSyncStats();
 
 async function refreshClientTags() {
   const btn = document.getElementById("refreshClientTagsBtn");
   const sel = document.getElementById("ver_target");
-  const currentVal = sel.value;
+  // Use stored target from shared state as the pre-select anchor
+  const stored = getVersionState()?.client?.target || "";
   btn.disabled = true; btn.textContent = "…";
   try {
     const resp = await fetch("/v1/admin/version/tags?limit=20", {headers});
@@ -234,10 +200,18 @@ async function refreshClientTags() {
     const data = await resp.json();
     sel.innerHTML = "";
     if (data.tags && data.tags.length > 0) {
+      // If the stored version is not in the release list (e.g. "0.1.0-dev"),
+      // prepend it so it appears selected as the current value.
+      if (stored && !data.tags.includes(stored)) {
+        const cur = document.createElement("option");
+        cur.value = stored; cur.textContent = stored + " (current)";
+        cur.selected = true;
+        sel.appendChild(cur);
+      }
       for (const tag of data.tags) {
         const opt = document.createElement("option");
         opt.value = tag; opt.textContent = tag;
-        if (tag === currentVal) opt.selected = true;
+        if (tag === stored) opt.selected = true;
         sel.appendChild(opt);
       }
     } else {
@@ -246,6 +220,8 @@ async function refreshClientTags() {
   } catch(err) { btn.title = "Error: " + err.message; }
   finally { btn.disabled = false; btn.textContent = "↻"; }
   updateClientReleaseLink();
+  // Refresh state so hint + stats reflect the latest tags
+  refreshVersionState();
 }
 
 function updateClientReleaseLink() {
@@ -261,21 +237,24 @@ function updateClientReleaseLink() {
 
 document.getElementById("refreshClientTagsBtn").addEventListener("click", refreshClientTags);
 document.getElementById("ver_target").addEventListener("change", updateClientReleaseLink);
-refreshClientTags();
+loadVersionConfig();
 
 document.getElementById("versionForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const status = document.getElementById("versionStatus");
   const body = {
-    target_version: document.getElementById("ver_target").value,
-    rollout_mode: document.getElementById("ver_rollout").value,
-    rollout_percentage: parseInt(document.getElementById("ver_pct").value) || 100,
-    sha256: document.getElementById("ver_sha").value
+    target_version:      document.getElementById("ver_target").value,
+    rollout_mode:        document.getElementById("ver_rollout").value,
+    rollout_percentage:  parseInt(document.getElementById("ver_pct").value) || 100,
+    sha256:              document.getElementById("ver_sha").value
   };
   try {
     const resp = await fetch("/v1/admin/version", {method: "POST", headers, body: JSON.stringify(body)});
-    if (resp.ok) { showStatus(status, "Saved ✓", true); }
-    else { showStatus(status, "Error: " + resp.status + " " + await resp.text(), false); }
+    if (resp.ok) {
+      showStatus(status, "Saved ✓", true);
+      // Invalidate state so the new target propagates to hint + stats immediately
+      refreshVersionState();
+    } else { showStatus(status, "Error: " + resp.status + " " + await resp.text(), false); }
   } catch(err) { showStatus(status, "Network error: " + err.message, false); }
 });
 </script>
