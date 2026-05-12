@@ -96,8 +96,14 @@ func (h *CompletionsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Register pending slot
 	pending := h.queue.Register(unitID)
 
-	// Dispatch to worker
-	if err := h.gateway.Dispatch(workUnit); err != nil {
+	// Dispatch to worker — PAUSE triggers must reach paused workers to toggle them.
+	var dispatchedTo *gateway.WorkerInfo
+	if containsPauseTrigger(req.Messages) {
+		dispatchedTo, err = h.gateway.DispatchForced(workUnit)
+	} else {
+		dispatchedTo, err = h.gateway.Dispatch(workUnit)
+	}
+	if err != nil {
 		h.queue.Cancel(unitID)
 		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("failed to dispatch: %v", err))
 		return
@@ -106,10 +112,10 @@ func (h *CompletionsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Record in DB
 	workerFingerprint := ""
 	workerRole := ""
-	if info := h.gateway.WorkerStatus(); info != nil {
-		workerFingerprint = info.Fingerprint
+	if dispatchedTo != nil {
+		workerFingerprint = dispatchedTo.Fingerprint
 		if h.store != nil {
-			if wc, _ := h.store.GetWorkerConfig(info.Fingerprint); wc != nil {
+			if wc, _ := h.store.GetWorkerConfig(dispatchedTo.Fingerprint); wc != nil {
 				workerRole = wc.PreferredRole
 			}
 		}

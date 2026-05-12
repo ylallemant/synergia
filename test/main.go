@@ -51,8 +51,13 @@ const (
 	managerRedirectAddr = "127.0.0.1:7080"
 	// Test-specific client ports — deliberately different from the defaults (9876/9877)
 	// so the test never conflicts with a production Synergia client running on the same machine.
-	clientDashboardAddr = "127.0.0.1:7502"
-	clientLlamaAddr     = "127.0.0.1:7503"
+	// Three clients run in parallel, each on its own port pair.
+	clientDashboardAddr  = "127.0.0.1:7502" // client 1 (embedding)
+	clientLlamaAddr      = "127.0.0.1:7503"
+	client2DashboardAddr = "127.0.0.1:7505" // client 2 (inference)
+	client2LlamaAddr     = "127.0.0.1:7506"
+	client3DashboardAddr = "127.0.0.1:7507" // client 3 (tester)
+	client3LlamaAddr     = "127.0.0.1:7508"
 	apiKey              = "test-api-key"
 	workerKey           = "test-worker-key"
 	adminUser           = "admin"
@@ -245,8 +250,12 @@ func main() {
 	}
 
 	// Pre-flight: kill any stale processes holding required ports.
-	// 9877 is where the client will start its own llama-server.
-	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, clientLlamaAddr, clientDashboardAddr} {
+	for _, addr := range []string{
+		managerAddr, managerAdminAddr, managerRedirectAddr,
+		clientDashboardAddr, clientLlamaAddr,
+		client2DashboardAddr, client2LlamaAddr,
+		client3DashboardAddr, client3LlamaAddr,
+	} {
 		freePort(addr)
 	}
 
@@ -333,6 +342,7 @@ func main() {
 		fatal("start cluster-manager: %v", err)
 	}
 	defer cleanup("cluster-manager", managerCmd)
+	watcher.add("cluster-manager", managerCmd, managerLogs)
 
 	// Wait for manager to be ready
 	if err := waitForHTTP("https://"+managerAddr+"/healthz", 30*time.Second); err != nil {
@@ -372,31 +382,62 @@ func main() {
 	}
 	pass("Model listed: %s", testModelFilename)
 
-	// --- Step 6: Start cluster-client ---
-	step("6. Starting cluster-client")
-	clientDataDir := filepath.Join(dataDir, "client-data")
-	clientLogs := newLogBuffer("cluster-client", logDir)
-	defer clientLogs.Close()
-	clientCmd := exec.Command("go", "run", "./cmd/synergia-client",
-		"--manager-url", "wss://"+managerAddr+"/ws/worker",
-		"--llm-url", "http://"+clientLlamaAddr,
-		"--dashboard-addr", clientDashboardAddr,
-		"--model", testModelName,
-		"--quantisation", testQuantisation,
-		"--role", "embedding",
-		"--model-file", modelPath, // sets the models directory for downloads
-		"--data-dir", clientDataDir,
-		"--auto-approve",
-		"--tls-ca-cert", caCertPath,
-	)
-	clientCmd.Dir = repoRoot
-	clientCmd.Env = append(os.Environ(), "LOG_LEVEL=debug", "CLUSTER_WORKER_KEY="+workerKey)
-	clientCmd.Stdout = clientLogs
-	clientCmd.Stderr = clientLogs
-	if err := clientCmd.Start(); err != nil {
-		fatal("start cluster-client: %v", err)
+	// --- Step 6: Start 3 cluster-clients ---
+	step("6. Starting 3 cluster-clients (embedding, inference, tester)")
+
+	type clientSpec struct {
+		name      string
+		dashAddr  string
+		llamaAddr string
+		role      string
 	}
-	defer cleanup("cluster-client", clientCmd)
+	clientSpecs := []clientSpec{
+		{"cluster-client-7502", clientDashboardAddr, clientLlamaAddr, "embedding"},
+		{"cluster-client-7505", client2DashboardAddr, client2LlamaAddr, "inference"},
+		{"cluster-client-7507", client3DashboardAddr, client3LlamaAddr, "tester"},
+	}
+
+	// startClient builds, starts, and watcher-registers a client process.
+	// The caller must register defer cleanup(name, cmd) and defer logs.Close()
+	// in the outer function scope (defer inside a helper runs on helper return).
+	startClient := func(cs clientSpec) (*logBuffer, *exec.Cmd) {
+		dashPort := strings.Split(cs.dashAddr, ":")[1]
+		logs := newLogBuffer(cs.name, logDir)
+		cmd := exec.Command("go", "run", "./cmd/synergia-client",
+			"--manager-url", "wss://"+managerAddr+"/ws/worker",
+			"--llm-url", "http://"+cs.llamaAddr,
+			"--dashboard-addr", cs.dashAddr,
+			"--model", testModelName,
+			"--quantisation", testQuantisation,
+			"--role", cs.role,
+			"--model-file", modelPath,
+			"--data-dir", filepath.Join(dataDir, "client-data-"+dashPort),
+			"--auto-approve",
+			"--tls-ca-cert", caCertPath,
+		)
+		cmd.Dir = repoRoot
+		cmd.Env = append(os.Environ(),
+			"LOG_LEVEL=debug",
+			"CLUSTER_WORKER_KEY="+workerKey,
+			"GPU_CONTENTION_THRESHOLD=100",
+		)
+		cmd.Stdout = logs
+		cmd.Stderr = logs
+		if err := cmd.Start(); err != nil {
+			fatal("start %s: %v", cs.name, err)
+		}
+		watcher.add(cs.name, cmd, logs)
+		return logs, cmd
+	}
+
+	// Phase 1: single worker — embedding client only.
+	// Steps 7–21 rely on single-worker semantics (PAUSE toggle, consent withdrawal,
+	// model update, binary update). Additional workers are added in Phase 2 (step 21b).
+	var allClientLogs []*logBuffer
+	clientLogs, client1Cmd := startClient(clientSpecs[0])
+	defer clientLogs.Close()
+	defer cleanup(clientSpecs[0].name, client1Cmd)
+	allClientLogs = append(allClientLogs, clientLogs)
 
 	// --- Step 7: Verify client registration ---
 	step("7. Waiting for client registration")
@@ -467,6 +508,7 @@ func main() {
 			fatal("start tofu-manager: %v", err)
 		}
 		defer cleanup("tofu-manager", tofuManagerCmd)
+		watcher.add("tofu-manager", tofuManagerCmd, tofuManagerLogs)
 
 		if err := waitForHTTP("https://"+tofuManagerAddr+"/healthz", 30*time.Second); err != nil {
 			tofuManagerLogs.Dump(os.Stderr)
@@ -497,6 +539,7 @@ func main() {
 			fatal("start tofu-client: %v", err)
 		}
 		defer cleanup("tofu-client", tofuClientCmd)
+		watcher.add("tofu-client", tofuClientCmd, tofuClientLogs)
 
 		// Client should log TOFU mode selection
 		if err := waitForLog(tofuClientLogs, "TOFU mode — awaiting challenge", 15*time.Second); err != nil {
@@ -585,10 +628,13 @@ func main() {
 	pass("Large payload completion received (%d bytes)", len(largeResp))
 
 	// --- Step 10: Verify work unit was processed ---
+	// Work may have been dispatched to any of the 3 clients, so check all logs.
 	step("10. Verifying work unit processing in logs")
-	if err := waitForLog(clientLogs, "work unit completed", 60*time.Second); err != nil {
-		clientLogs.Dump(os.Stderr)
-		fatal("client did not process work unit: %v", err)
+	if err := waitForLogAny(allClientLogs, "work unit completed", 60*time.Second); err != nil {
+		for _, lb := range allClientLogs {
+			lb.Dump(os.Stderr)
+		}
+		fatal("no client processed work unit: %v", err)
 	}
 	pass("Client processed work unit")
 
@@ -1173,7 +1219,7 @@ func main() {
 			pass("llama-server restarted and ready with b9049")
 
 			// Verify the installed binary works
-			backendBin := filepath.Join(dataDir, "client-data", "backend", "llama-server")
+			backendBin := filepath.Join(dataDir, "client-data-7502", "backend", "llama-server")
 			if runtime.GOOS == "windows" {
 				backendBin += ".exe"
 			}
@@ -1238,6 +1284,34 @@ func main() {
 			pass("llama-server restarted and ready with b9050")
 		}
 	}
+
+	// --- Step 21b: Phase 2 — start additional workers and verify multi-worker dispatch ---
+	step("21b. Starting additional workers (inference, tester) for multi-worker validation")
+	for _, cs := range clientSpecs[1:] {
+		logs, cmd := startClient(cs)
+		defer logs.Close()
+		defer cleanup(cs.name, cmd)
+		allClientLogs = append(allClientLogs, logs)
+	}
+	// Wait for all additional workers to connect and become available.
+	for i := 1; i <= len(clientSpecs)-1; i++ {
+		if err := waitForLog(managerLogs, "worker connected", 30*time.Second); err != nil {
+			managerLogs.Dump(os.Stderr)
+			fatal("additional worker %d did not connect: %v", i+1, err)
+		}
+	}
+	pass("All %d workers connected to manager", len(clientSpecs))
+
+	// Verify dispatch works across multiple workers.
+	multiResp, multiErr := sendCompletionWithMessage("https://"+managerAddr+"/v1/chat/completions", apiKey, testModelName, "What is 4+4?")
+	if multiErr != nil {
+		fatal("multi-worker dispatch failed: %v", multiErr)
+	}
+	pass("Multi-worker dispatch succeeded (%d bytes)", len(multiResp))
+	if err := waitForLogAny(allClientLogs, "work unit completed", 60*time.Second); err != nil {
+		fatal("no worker processed multi-worker dispatch: %v", err)
+	}
+	pass("Work unit processed by one of %d workers", len(clientSpecs))
 
 	// --- Step 22: Collect output ---
 	step("22. Collecting output")
@@ -1335,31 +1409,14 @@ func main() {
 			}
 		}()
 
+		// The processWatcher monitors all workers and the manager; any unexpected
+		// exit triggers fatal() → stopAll(). Here we only need to handle
+		// user-initiated shutdown via Ctrl-C / SIGTERM.
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-		// Detect if client exits (e.g., user clicked Quit in system tray)
-		clientDone := make(chan struct{})
-		go func() {
-			clientCmd.Wait()
-			close(clientDone)
-		}()
-
-		// Detect if manager exits unexpectedly
-		managerDone := make(chan struct{})
-		go func() {
-			managerCmd.Wait()
-			close(managerDone)
-		}()
-
-		select {
-		case <-sigCh:
-			log.Info().Msg("signal received, shutting down...")
-		case <-clientDone:
-			log.Info().Msg("client exited (tray Quit?), shutting down...")
-		case <-managerDone:
-			log.Error().Msg("manager exited unexpectedly, shutting down...")
-		}
+		<-sigCh
+		watcher.stopping.Store(true)
+		log.Info().Msg("signal received, shutting down...")
 
 		close(payloadStop)
 		finalCount := payloadCount.Load()
@@ -1844,6 +1901,68 @@ func getBatchStatus(url, key string) (string, error) {
 	return result.Status, nil
 }
 
+// processWatcher monitors all started child processes. If any exits while the
+// test is running it kills every other process and fails the test.
+type processWatcher struct {
+	mu       sync.Mutex
+	procs    []watchedProc
+	stopping atomic.Bool
+}
+
+type watchedProc struct {
+	name string
+	cmd  *exec.Cmd
+	logs *logBuffer
+}
+
+var watcher = &processWatcher{}
+
+func (pw *processWatcher) add(name string, cmd *exec.Cmd, logs *logBuffer) {
+	pw.mu.Lock()
+	pw.procs = append(pw.procs, watchedProc{name, cmd, logs})
+	pw.mu.Unlock()
+	go func() {
+		cmd.Wait() //nolint:errcheck
+		if pw.stopping.Load() {
+			return
+		}
+		log.Error().Str("process", name).Msg("process exited unexpectedly")
+		if logs != nil {
+			logs.Dump(os.Stderr)
+		}
+		fatal("process %q exited unexpectedly — aborting test", name)
+	}()
+}
+
+func (pw *processWatcher) stopAll() {
+	if !pw.stopping.CompareAndSwap(false, true) {
+		return // already stopping
+	}
+	pw.mu.Lock()
+	procs := make([]watchedProc, len(pw.procs))
+	copy(procs, pw.procs)
+	pw.mu.Unlock()
+	for _, p := range procs {
+		cleanup(p.name, p.cmd)
+	}
+}
+
+// waitForLogAny polls multiple log buffers and returns nil as soon as any one
+// of them contains substr within the timeout. Used when a dispatched work unit
+// could land on any of several worker processes.
+func waitForLogAny(bufs []*logBuffer, substr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, lb := range bufs {
+			if lb.Contains(substr) {
+				return nil
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for any client log containing %q", substr)
+}
+
 func cleanup(name string, cmd *exec.Cmd) {
 	if cmd.Process != nil {
 		log.Info().Str("process", name).Msg("stopping")
@@ -1878,6 +1997,7 @@ func pass(format string, args ...any) {
 
 func fatal(format string, args ...any) {
 	log.Error().Msgf("  ✗ "+format, args...)
+	watcher.stopAll()
 	os.Exit(1)
 }
 
@@ -2171,8 +2291,12 @@ func runServices() {
 	cleanupOldRuns(filepath.Join(testDir, "runs"), 3)
 
 	// Pre-flight: kill any stale processes holding required ports.
-	// 9877 is the port the client uses for its own llama-server process.
-	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, clientLlamaAddr, clientDashboardAddr} {
+	for _, addr := range []string{
+		managerAddr, managerAdminAddr, managerRedirectAddr,
+		clientDashboardAddr, clientLlamaAddr,
+		client2DashboardAddr, client2LlamaAddr,
+		client3DashboardAddr, client3LlamaAddr,
+	} {
 		freePort(addr)
 	}
 
@@ -2269,31 +2393,49 @@ func runServices() {
 	}
 	log.Info().Str("addr", managerAddr).Msg("cluster-manager ready")
 
-	// --- Start cluster-client (clean directory — no binary, no cached state) ---
-	// The client will download and start its own llama-server on port "+clientLlamaAddr+",
-	// exactly as it would on a real first-run installation.
-	clientDataDir := filepath.Join(dataDir, "client-data")
-	clientLogs := newLogBuffer("cluster-client", logDir)
-	defer clientLogs.Close()
-	clientCmd := exec.Command("go", "run", "./cmd/synergia-client",
-		"--manager-url", "wss://"+managerAddr+"/ws/worker",
-		"--llm-url", "http://"+clientLlamaAddr,
-		"--dashboard-addr", clientDashboardAddr,
-		"--model", testModelName,
-		"--quantisation", testQuantisation,
-		"--role", "tester",
-		"--model-file", modelPath, // sets the models directory; file already exists so no download needed
-		"--data-dir", clientDataDir,
-		"--auto-approve",
-		"--tls-ca-cert", caCertPath,
-	)
-	clientCmd.Dir = repoRoot
-	clientCmd.Env = append(os.Environ(), "LOG_LEVEL=debug", "CLUSTER_WORKER_KEY="+workerKey)
-	clientCmd.Stdout = clientLogs
-	clientCmd.Stderr = clientLogs
-	if err := clientCmd.Start(); err != nil {
-		fatal("start cluster-client: %v", err)
+	// --- Start 3 cluster-clients (clean directories — no binary, no cached state) ---
+	sendClientSpecs := []struct {
+		name      string
+		dashAddr  string
+		llamaAddr string
+		role      string
+	}{
+		{"cluster-client-7502", clientDashboardAddr, clientLlamaAddr, "embedding"},
+		{"cluster-client-7505", client2DashboardAddr, client2LlamaAddr, "inference"},
+		{"cluster-client-7507", client3DashboardAddr, client3LlamaAddr, "tester"},
 	}
+
+	var clientLogs *logBuffer
+	var clientCmd *exec.Cmd
+	for i, cs := range sendClientSpecs {
+		dashPort := strings.Split(cs.dashAddr, ":")[1]
+		logs := newLogBuffer(cs.name, logDir)
+		defer logs.Close()
+		cmd := exec.Command("go", "run", "./cmd/synergia-client",
+			"--manager-url", "wss://"+managerAddr+"/ws/worker",
+			"--llm-url", "http://"+cs.llamaAddr,
+			"--dashboard-addr", cs.dashAddr,
+			"--model", testModelName,
+			"--quantisation", testQuantisation,
+			"--role", cs.role,
+			"--model-file", modelPath,
+			"--data-dir", filepath.Join(dataDir, "client-data-"+dashPort),
+			"--auto-approve",
+			"--tls-ca-cert", caCertPath,
+		)
+		cmd.Dir = repoRoot
+		cmd.Env = append(os.Environ(), "LOG_LEVEL=debug", "CLUSTER_WORKER_KEY="+workerKey)
+		cmd.Stdout = logs
+		cmd.Stderr = logs
+		if err := cmd.Start(); err != nil {
+			fatal("start %s: %v", cs.name, err)
+		}
+		if i == 0 {
+			clientLogs = logs
+			clientCmd = cmd
+		}
+	}
+	_ = clientLogs
 
 	log.Info().Msg("")
 	log.Info().Msg("All services started — bootstrapping client (binary download → model push → llama-server start)")

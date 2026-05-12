@@ -17,7 +17,9 @@ The `test` package is a self-contained integration test binary. It compiles and 
 go run ./test
 ```
 
-Runs all 22 test steps sequentially. Exits with a non-zero code and dumps relevant logs on any failure. Keeps the last 3 run directories under `test/runs/`.
+Runs all test steps sequentially in two phases (see below). Exits with a non-zero code and dumps relevant logs on any failure. Keeps the last 3 run directories under `test/runs/`.
+
+**Process watcher**: if any started process exits unexpectedly during the test, all others are immediately stopped and the test fails.
 
 ### `--keep-alive` — test + live services
 
@@ -25,13 +27,15 @@ Runs all 22 test steps sequentially. Exits with a non-zero code and dumps releva
 go run ./test --keep-alive
 ```
 
-Runs the full test suite (skipping the longer destructive steps — model update, PANIC trigger, consent withdrawal, real llama.cpp download). After all tests pass, keeps the manager and client alive and starts a background payload sender (live completions every 1–4 s, batch requests every 10–20 s). Services stop on `Ctrl-C` or when the system tray is used to quit the client.
+Runs the full test suite (skipping the longer destructive steps — model update, PANIC trigger, consent withdrawal, real llama.cpp download). After all tests pass, keeps the manager and all 3 clients alive and starts a background payload sender (live completions every 1–4 s, batch requests every 10–20 s). Services stop on `Ctrl-C`. Quitting any worker via its system tray also stops all other services.
 
 Useful for manual exploration of the admin dashboard and client dashboard after a successful test run:
 
 | Interface | URL |
 |---|---|
-| Client Dashboard | `http://127.0.0.1:9876/static/index.html` |
+| Client Dashboard (embedding) | `http://127.0.0.1:7502/static/index.html` |
+| Client Dashboard (inference) | `http://127.0.0.1:7505/static/index.html` |
+| Client Dashboard (tester)    | `http://127.0.0.1:7507/static/index.html` |
 | Admin Dashboard | `https://127.0.0.1:7501/login` (admin / synergia) |
 | Manager API | `https://127.0.0.1:7500` |
 
@@ -41,7 +45,7 @@ Useful for manual exploration of the admin dashboard and client dashboard after 
 go run ./test --run
 ```
 
-Starts the manager and client in the same configuration as the test (fresh data directory, local binary distribution server, `--development` mode) but does not run any assertions. Blocks until `Ctrl-C`. Intended for manual testing and debugging against a clean local stack.
+Starts the manager and one client in the same configuration as the test (fresh data directory, local binary distribution server, `--development` mode) but does not run any assertions. Blocks until `Ctrl-C`. Intended for manual testing and debugging against a clean local stack.
 
 ### `--send` — payload sender against a live endpoint
 
@@ -59,6 +63,10 @@ Sends live chat completions and batch requests continuously to an already-runnin
 
 ## Test Steps
 
+The test runs in two phases. **Phase 1** uses a single worker (embedding, port 7502) to exercise steps that require single-worker semantics (PAUSE toggle, consent withdrawal, model update, binary update). **Phase 2** starts two additional workers and validates multi-worker dispatch.
+
+### Phase 1 — single worker
+
 | Step | What it tests |
 |---|---|
 | 0 | Generate self-signed TLS CA + server certificate used for the test manager |
@@ -67,10 +75,10 @@ Sends live chat completions and batch requests continuously to an already-runnin
 | 3 | *(informational)* — llama-server will be started by the client after binary/model push |
 | 4 | Start `synergia-manager` with `--development`, TLS, bearer auth, and the local binary distribution URL |
 | 5 | Verify the model listing endpoint returns the expected test model |
-| 6 | Start `synergia-client` with a clean data directory (no cached binary, no cached model) |
+| 6 | Start embedding client (port 7502) with a clean data directory (no cached binary, no cached model) |
 | 7 | Verify the client registers with the manager via key-auth (Bearer token) |
-| 7a | Wait for the client's `InitialSync` bootstrap to complete — the client detects a fresh install, signals the manager, and the manager pushes `BackendUpdate` + `ModelUpdate`; the client downloads the binary, installs it, downloads the model, and starts llama-server on port 9877 |
-| 7b | Run a parallel TOFU (Trust On First Use) handshake test — a second manager (no worker key) and a second client authenticate via challenge/nonce/signature exchange |
+| 7a | Wait for the client's `InitialSync` bootstrap to complete — the client detects a fresh install, signals the manager, and the manager pushes `BackendUpdate` + `ModelUpdate`; the client downloads the binary, installs it, downloads the model, and starts llama-server on port 7503 |
+| 7b | Run a parallel TOFU (Trust On First Use) handshake test — a second manager (no worker key) and a fourth client (port 7504) authenticate via challenge/nonce/signature exchange |
 | 8 | Verify the worker appears in `/v1/workers` |
 | 9 | Send three chat completion requests at increasing payload sizes (small ~150 B, medium ~1 KB, large ~5 KB) |
 | 10 | Verify work unit completion and result delivery in logs |
@@ -85,7 +93,29 @@ Sends live chat completions and batch requests continuously to an already-runnin
 | 19 | Verify latency samples are recorded in the admin API and DB |
 | 20 | Post a target client version via admin API and verify the worker receives a `binary_update` push |
 | 21 | Download two real llama.cpp releases from GitHub (b9049 → b9050), verify the client installs and restarts llama-server with each *(skipped with `--keep-alive`; downloads ~16 MB per step)* |
+
+### Phase 2 — multi-worker
+
+| Step | What it tests |
+|---|---|
+| 21b | Start two additional clients: inference (port 7505) and tester (port 7507); verify all 3 workers connect to the manager; verify that a completion request is dispatched to and processed by one of them |
 | 22 | Write collected API responses to `test/runs/<timestamp>/data/` |
+
+## Ports used by the test
+
+| Service | Port(s) |
+|---|---|
+| Manager (API + WebSocket) | 7500 |
+| Manager (Admin) | 7501 |
+| Manager (HTTP→HTTPS redirect) | 7080 |
+| Client 1 — embedding (dashboard / llama-server) | 7502 / 7503 |
+| Client 4 — TOFU test (dashboard only) | 7504 |
+| Client 2 — inference (dashboard / llama-server) | 7505 / 7506 |
+| Client 3 — tester (dashboard / llama-server) | 7507 / 7508 |
+| TOFU manager (API) | 7510 |
+| TOFU manager (Admin) | 7511 |
+
+All ports are deliberately different from the production defaults (9876/9877) so the test never conflicts with a running Synergia installation.
 
 ## Run Output
 
@@ -94,19 +124,22 @@ Each run creates a timestamped directory:
 ```
 test/runs/2026-05-12_08-27-43/
   logs/
-    test-run.log          # test binary own output
-    cluster-manager.log   # manager process stdout/stderr
-    cluster-client.log    # client process stdout/stderr
-    tofu-manager.log      # TOFU test manager (step 7b)
-    tofu-client.log       # TOFU test client (step 7b)
+    test-run.log                  # test binary own output
+    cluster-manager.log           # manager process stdout/stderr
+    cluster-client-7502.log       # embedding client
+    cluster-client-7505.log       # inference client (Phase 2)
+    cluster-client-7507.log       # tester client (Phase 2)
+    tofu-manager.log              # TOFU test manager (step 7b)
+    tofu-client.log               # TOFU test client (step 7b)
   data/
-    cluster-manager.db    # SQLite DB
+    cluster-manager.db            # SQLite DB
     completion-response.json
     stats.json
     workers.json
-    latency.json
-    client-errors.json
-    client-data/          # client's working directory (downloaded binary, model)
+    client-data-7502/             # embedding client's working directory
+    client-data-7505/             # inference client's working directory
+    client-data-7507/             # tester client's working directory
+    tofu-client-data/             # TOFU client's working directory
 ```
 
 The last 3 runs are kept; older ones are deleted automatically.

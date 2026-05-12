@@ -239,7 +239,7 @@ func TestServeHTTP_FingerprintMismatch_Returns400(t *testing.T) {
 
 // ── single-slot enforcement ───────────────────────────────────────────────────
 
-func TestServeHTTP_SecondWorker_RejectedWithPolicyViolation(t *testing.T) {
+func TestServeHTTP_SecondWorker_AcceptedConcurrently(t *testing.T) {
 	gw := newTestGateway("secret")
 	srv := httptest.NewServer(gw)
 	defer srv.Close()
@@ -257,7 +257,6 @@ func TestServeHTTP_SecondWorker_RejectedWithPolicyViolation(t *testing.T) {
 	first := connect()
 	defer first.Close()
 
-	// Wait for the first worker to occupy the slot.
 	if !waitForWorker(gw, 2*time.Second) {
 		t.Fatal("first worker did not connect")
 	}
@@ -265,14 +264,16 @@ func TestServeHTTP_SecondWorker_RejectedWithPolicyViolation(t *testing.T) {
 	second := connect()
 	defer second.Close()
 
-	second.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, _, err := second.ReadMessage()
-	if err == nil {
-		t.Fatal("expected second worker to receive a close message")
+	// Both workers should now be registered.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if gw.WorkerCount() == 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	closeErr, ok := err.(*websocket.CloseError)
-	if !ok || closeErr.Code != websocket.ClosePolicyViolation {
-		t.Errorf("want ClosePolicyViolation, got %v", err)
+	if got := gw.WorkerCount(); got != 2 {
+		t.Errorf("want 2 connected workers, got %d", got)
 	}
 }
 

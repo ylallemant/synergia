@@ -337,7 +337,8 @@ func (h *BatchHandler) processNext() {
 
 	pending2 := h.queue.Register(unitID)
 
-	if err := h.gateway.Dispatch(workUnit); err != nil {
+	dispatchedTo, err := h.gateway.Dispatch(workUnit)
+	if err != nil {
 		h.queue.Cancel(unitID)
 		_ = h.store.FailBatchRequest(br.RequestID, fmt.Sprintf("dispatch failed: %v", err))
 		return
@@ -345,9 +346,9 @@ func (h *BatchHandler) processNext() {
 
 	workerFingerprint := ""
 	workerRole := ""
-	if info := h.gateway.WorkerStatus(); info != nil {
-		workerFingerprint = info.Fingerprint
-		if wc, _ := h.store.GetWorkerConfig(info.Fingerprint); wc != nil {
+	if dispatchedTo != nil {
+		workerFingerprint = dispatchedTo.Fingerprint
+		if wc, _ := h.store.GetWorkerConfig(dispatchedTo.Fingerprint); wc != nil {
 			workerRole = wc.PreferredRole
 		}
 	}

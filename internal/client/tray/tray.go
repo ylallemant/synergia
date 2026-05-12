@@ -62,7 +62,6 @@ func (t *Tray) Quit() {
 }
 
 func (t *Tray) onReady() {
-	systray.SetTitle("DT")
 	systray.SetTooltip("Synergia Worker")
 	t.setIcon(iconConnectedIdle)
 
@@ -74,9 +73,6 @@ func (t *Tray) onReady() {
 		mBackend = systray.AddMenuItem("Open Backend", "Open the cluster manager admin page")
 	}
 
-	systray.AddSeparator()
-	mStatus := systray.AddMenuItem("Status: starting...", "")
-	mStatus.Disable()
 	systray.AddSeparator()
 	mPause := systray.AddMenuItem("Pause", "Stop accepting work units")
 	mResume := systray.AddMenuItem("Resume", "Resume accepting work units")

@@ -23,6 +23,15 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+const (
+	// pingInterval is how often the manager sends a WebSocket ping to each worker.
+	pingInterval = 20 * time.Second
+	// pongWait is the read deadline; if no message (including pong) arrives within
+	// this window the connection is considered dead and the slot is released.
+	// Must be > pingInterval and safely below the client's reconnect interval (60 s).
+	pongWait = 50 * time.Second
+)
+
 // WorkerInfo holds metadata about a connected worker.
 type WorkerInfo struct {
 	Fingerprint  string
@@ -42,8 +51,8 @@ type Gateway struct {
 	queue     *queue.Queue
 	store     *store.Store
 
-	mu     sync.RWMutex
-	worker *workerConn // Phase 1: single worker
+	mu      sync.RWMutex
+	workers map[string]*workerConn // fingerprint → connection
 
 	// Known fingerprint → public key registry (in-memory cache)
 	knownKeys   map[string]ed25519.PublicKey
@@ -60,6 +69,7 @@ func New(workerKey string, q *queue.Queue, s *store.Store) *Gateway {
 		workerKey: workerKey,
 		queue:     q,
 		store:     s,
+		workers:   make(map[string]*workerConn),
 		knownKeys: make(map[string]ed25519.PublicKey),
 	}
 }
@@ -176,19 +186,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	g.mu.Lock()
-	if g.worker != nil {
-		// Phase 1: single worker slot — reject the new connection so the two
-		// workers don't ping-pong each other off the slot. The rejected worker
-		// will back off and retry; when the current worker disconnects it can
-		// take the slot.
-		g.mu.Unlock()
-		log.Warn().Str("fingerprint", fingerprint).Msg("worker slot occupied — rejecting new connection")
-		conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "slot occupied"))
-		conn.Close()
-		return
+	// If the same fingerprint reconnects (e.g. after a restart) while the old
+	// connection is still registered, close the old one so its readLoop exits
+	// and removes it from the map before the new entry is added.
+	if old, exists := g.workers[fingerprint]; exists {
+		old.conn.Close()
 	}
-	g.worker = wc
+	g.workers[fingerprint] = wc
 	g.mu.Unlock()
 
 	// Persist worker in DB
@@ -232,88 +236,117 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go g.readLoop(wc)
 }
 
-// Dispatch sends a work unit to the connected worker. Returns an error if no worker is connected,
-// if the worker has not accepted the data collection terms, or if the worker's LLM hash does not
-// match the expected hash for the role.
-func (g *Gateway) Dispatch(unit *protocol.WorkUnit) error {
+// Dispatch sends a work unit to the first available consenting worker.
+// Returns the dispatched-to worker's info and an error if no suitable worker is found.
+func (g *Gateway) Dispatch(unit *protocol.WorkUnit) (*WorkerInfo, error) {
 	g.mu.RLock()
-	wc := g.worker
-	g.mu.RUnlock()
+	defer g.mu.RUnlock()
 
-	if wc == nil {
-		return fmt.Errorf("no worker connected")
+	for _, wc := range g.workers {
+		if g.store != nil && !g.store.HasConsent(wc.info.Fingerprint) {
+			continue
+		}
+		if g.store != nil && !g.store.IsWorkerAvailable(wc.info.Fingerprint) {
+			continue
+		}
+		if err := wc.conn.WriteJSON(unit); err != nil {
+			continue
+		}
+		info := wc.info
+		return &info, nil
 	}
-
-	// Verify worker consent before dispatching
-	if g.store != nil && !g.store.HasConsent(wc.info.Fingerprint) {
-		return fmt.Errorf("worker %s has not accepted data collection terms", wc.info.Fingerprint[:12])
-	}
-
-	return wc.conn.WriteJSON(unit)
+	return nil, fmt.Errorf("no available worker")
 }
 
-// DispatchWithHashCheck sends a work unit only if the worker's LLM hash matches the expected role hash.
-func (g *Gateway) DispatchWithHashCheck(unit *protocol.WorkUnit, expectedHash string) error {
+// DispatchForced sends a work unit to the first consenting worker regardless of
+// availability status. Used for PAUSE toggle triggers which must reach a paused
+// worker to unpause it.
+func (g *Gateway) DispatchForced(unit *protocol.WorkUnit) (*WorkerInfo, error) {
 	g.mu.RLock()
-	wc := g.worker
-	g.mu.RUnlock()
+	defer g.mu.RUnlock()
 
-	if wc == nil {
-		return fmt.Errorf("no worker connected")
+	for _, wc := range g.workers {
+		if g.store != nil && !g.store.HasConsent(wc.info.Fingerprint) {
+			continue
+		}
+		if err := wc.conn.WriteJSON(unit); err != nil {
+			continue
+		}
+		info := wc.info
+		return &info, nil
 	}
-
-	// Verify worker consent before dispatching
-	if g.store != nil && !g.store.HasConsent(wc.info.Fingerprint) {
-		return fmt.Errorf("worker %s has not accepted data collection terms", wc.info.Fingerprint[:12])
-	}
-
-	// Verify LLM hash matches central configuration
-	if expectedHash != "" && g.store != nil && !g.store.WorkerLLMHashMatches(wc.info.Fingerprint, expectedHash) {
-		return fmt.Errorf("worker %s LLM hash mismatch (expected %s)", wc.info.Fingerprint[:12], expectedHash[:12])
-	}
-
-	return wc.conn.WriteJSON(unit)
+	return nil, fmt.Errorf("no connected worker")
 }
 
-// HasWorker returns true if a worker is currently connected.
+// DispatchWithHashCheck sends a work unit to the first available worker whose
+// LLM hash matches expectedHash and who has given consent.
+func (g *Gateway) DispatchWithHashCheck(unit *protocol.WorkUnit, expectedHash string) (*WorkerInfo, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	for _, wc := range g.workers {
+		if g.store != nil && !g.store.HasConsent(wc.info.Fingerprint) {
+			continue
+		}
+		if expectedHash != "" && g.store != nil && !g.store.WorkerLLMHashMatches(wc.info.Fingerprint, expectedHash) {
+			continue
+		}
+		if err := wc.conn.WriteJSON(unit); err != nil {
+			continue
+		}
+		info := wc.info
+		return &info, nil
+	}
+	return nil, fmt.Errorf("no available worker matching hash")
+}
+
+// HasWorker returns true if at least one worker is currently connected.
 func (g *Gateway) HasWorker() bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return g.worker != nil
+	return len(g.workers) > 0
 }
 
-// HasAvailableWorker returns true if a worker is connected AND in "available" state
-// (not paused, idle, or processing).
+// HasAvailableWorker returns true if any connected worker is in "available" state.
 func (g *Gateway) HasAvailableWorker() bool {
 	g.mu.RLock()
-	wc := g.worker
-	g.mu.RUnlock()
+	defer g.mu.RUnlock()
 
-	if wc == nil {
-		return false
-	}
 	if g.store == nil {
-		return true // no store, assume available
+		return len(g.workers) > 0
 	}
-	return g.store.IsWorkerAvailable(wc.info.Fingerprint)
+	for _, wc := range g.workers {
+		if g.store.IsWorkerAvailable(wc.info.Fingerprint) {
+			return true
+		}
+	}
+	return false
 }
 
-// WorkerStatus returns info about the current worker, or nil.
+// WorkerStatus returns info about any one connected worker, or nil.
+// Used for logging context in admin push flows.
 func (g *Gateway) WorkerStatus() *WorkerInfo {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	if g.worker == nil {
-		return nil
+	for _, wc := range g.workers {
+		info := wc.info
+		return &info
 	}
-	info := g.worker.info
-	return &info
+	return nil
+}
+
+// WorkerCount returns the number of currently connected workers.
+func (g *Gateway) WorkerCount() int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return len(g.workers)
 }
 
 func (g *Gateway) readLoop(wc *workerConn) {
 	defer func() {
 		g.mu.Lock()
-		if g.worker == wc {
-			g.worker = nil
+		if g.workers[wc.info.Fingerprint] == wc {
+			delete(g.workers, wc.info.Fingerprint)
 		}
 		g.mu.Unlock()
 		wc.conn.Close()
@@ -321,6 +354,31 @@ func (g *Gateway) readLoop(wc *workerConn) {
 			_ = g.store.SetWorkerOffline(wc.info.Fingerprint)
 		}
 		log.Info().Str("fingerprint", wc.info.Fingerprint).Msg("worker disconnected")
+	}()
+
+	// Server-side keepalive: detect dead connections (e.g. proxy resets the
+	// client-side TCP leg while keeping the backend leg open) within pongWait.
+	wc.conn.SetReadDeadline(time.Now().Add(pongWait))
+	wc.conn.SetPongHandler(func(string) error {
+		wc.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := wc.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					return
+				}
+			}
+		}
 	}()
 
 	for {
@@ -331,6 +389,9 @@ func (g *Gateway) readLoop(wc *workerConn) {
 			}
 			return
 		}
+		// Any received message (including pong frames handled above) proves the
+		// connection is alive — reset the read deadline.
+		wc.conn.SetReadDeadline(time.Now().Add(pongWait))
 
 		var envelope protocol.Envelope
 		if err := json.Unmarshal(message, &envelope); err != nil {
@@ -507,7 +568,7 @@ func (g *Gateway) readLoop(wc *workerConn) {
 						Str("version", cfg.Version).
 						Str("fingerprint", wc.info.Fingerprint[:8]).
 						Msg("initial_sync: pushing backend binary to worker")
-					if err := g.PushBackendUpdate(cfg.Version, downloadURL, fallbackURL, cfg.SHA256); err != nil {
+					if err := g.pushBackendUpdateTo(wc, cfg.Version, downloadURL, fallbackURL, cfg.SHA256); err != nil {
 						log.Error().Err(err).Msg("initial_sync: failed to push backend update")
 					}
 				} else {
@@ -543,7 +604,7 @@ func (g *Gateway) readLoop(wc *workerConn) {
 							Str("filename", rm.ModelFilename).
 							Str("fingerprint", wc.info.Fingerprint[:8]).
 							Msg("initial_sync: pushing model update to worker")
-						if err := g.PushModelUpdate(syncReq.Role, rm.LLMModel, rm.Quantisation,
+						if err := g.pushModelUpdateTo(wc, syncReq.Role, rm.LLMModel, rm.Quantisation,
 							rm.ModelFilename, rm.ModelFileHash, llmHash,
 							rm.ContextSize, rm.ParallelSlots, rm.GPULayers,
 							rm.EndpointType, rm.FlashAttention); err != nil {
@@ -567,6 +628,36 @@ func (g *Gateway) readLoop(wc *workerConn) {
 	}
 }
 
+// pushBackendUpdateTo sends a backend update directly to a single worker connection.
+// Used by the InitialSync handler which must target one specific worker.
+func (g *Gateway) pushBackendUpdateTo(wc *workerConn, version, downloadURL, fallbackURL, sha256 string) error {
+	return wc.conn.WriteJSON(&protocol.BackendUpdate{
+		Type:        protocol.TypeBackendUpdate,
+		Version:     version,
+		DownloadURL: downloadURL,
+		FallbackURL: fallbackURL,
+		SHA256:      sha256,
+	})
+}
+
+// pushModelUpdateTo sends a model update directly to a single worker connection.
+func (g *Gateway) pushModelUpdateTo(wc *workerConn, role, model, quantisation, filename, modelFileHash, llmHash string, contextSize, parallelSlots, gpuLayers int, endpointType string, flashAttention bool) error {
+	return wc.conn.WriteJSON(&protocol.ModelUpdate{
+		Type:           protocol.TypeModelUpdate,
+		Role:           role,
+		Model:          model,
+		Quantisation:   quantisation,
+		Filename:       filename,
+		ModelFileHash:  modelFileHash,
+		LLMHash:        llmHash,
+		ContextSize:    contextSize,
+		EndpointType:   endpointType,
+		ParallelSlots:  parallelSlots,
+		GPULayers:      gpuLayers,
+		FlashAttention: flashAttention,
+	})
+}
+
 func (g *Gateway) verifyOrRegisterKey(fingerprint string, pubKey ed25519.PublicKey) bool {
 	g.knownKeysMu.Lock()
 	defer g.knownKeysMu.Unlock()
@@ -587,17 +678,9 @@ func (g *Gateway) verifyOrRegisterKey(fingerprint string, pubKey ed25519.PublicK
 	return true
 }
 
-// PushModelUpdate sends a model_update message to the connected worker,
-// instructing it to switch to the new model configuration.
+// PushModelUpdate broadcasts a model_update message to all connected workers.
+// Each worker filters by its own role, so broadcasting is correct.
 func (g *Gateway) PushModelUpdate(role, model, quantisation, filename, modelFileHash, llmHash string, contextSize, parallelSlots, gpuLayers int, endpointType string, flashAttention bool) error {
-	g.mu.RLock()
-	wc := g.worker
-	g.mu.RUnlock()
-
-	if wc == nil {
-		return fmt.Errorf("no worker connected")
-	}
-
 	update := &protocol.ModelUpdate{
 		Type:           protocol.TypeModelUpdate,
 		Role:           role,
@@ -613,28 +696,25 @@ func (g *Gateway) PushModelUpdate(role, model, quantisation, filename, modelFile
 		FlashAttention: flashAttention,
 	}
 
-	log.Info().
-		Str("role", role).
-		Str("model", model).
-		Str("quantisation", quantisation).
-		Str("filename", filename).
-		Str("llm_hash", llmHash).
-		Str("fingerprint", wc.info.Fingerprint).
-		Msg("pushing model update to worker")
-
-	return wc.conn.WriteJSON(update)
-}
-
-// PushBinaryUpdate sends a binary update notification to the connected worker.
-func (g *Gateway) PushBinaryUpdate(version, downloadURL, fallbackURL, sha256 string) error {
 	g.mu.RLock()
-	wc := g.worker
-	g.mu.RUnlock()
+	defer g.mu.RUnlock()
 
-	if wc == nil {
+	if len(g.workers) == 0 {
 		return fmt.Errorf("no worker connected")
 	}
+	var lastErr error
+	for _, wc := range g.workers {
+		log.Info().Str("role", role).Str("model", model).Str("fingerprint", wc.info.Fingerprint).
+			Msg("pushing model update to worker")
+		if err := wc.conn.WriteJSON(update); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
 
+// PushBinaryUpdate broadcasts a binary update notification to all connected workers.
+func (g *Gateway) PushBinaryUpdate(version, downloadURL, fallbackURL, sha256 string) error {
 	update := &protocol.BinaryUpdate{
 		Type:        protocol.TypeBinaryUpdate,
 		Version:     version,
@@ -643,24 +723,25 @@ func (g *Gateway) PushBinaryUpdate(version, downloadURL, fallbackURL, sha256 str
 		SHA256:      sha256,
 	}
 
-	log.Info().
-		Str("version", version).
-		Str("fingerprint", wc.info.Fingerprint).
-		Msg("pushing binary update to worker")
-
-	return wc.conn.WriteJSON(update)
-}
-
-// PushBackendUpdate sends a backend update notification to the connected worker.
-func (g *Gateway) PushBackendUpdate(version, downloadURL, fallbackURL, sha256 string) error {
 	g.mu.RLock()
-	wc := g.worker
-	g.mu.RUnlock()
+	defer g.mu.RUnlock()
 
-	if wc == nil {
+	if len(g.workers) == 0 {
 		return fmt.Errorf("no worker connected")
 	}
+	var lastErr error
+	for _, wc := range g.workers {
+		log.Info().Str("version", version).Str("fingerprint", wc.info.Fingerprint).
+			Msg("pushing binary update to worker")
+		if err := wc.conn.WriteJSON(update); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
 
+// PushBackendUpdate broadcasts a backend update notification to all connected workers.
+func (g *Gateway) PushBackendUpdate(version, downloadURL, fallbackURL, sha256 string) error {
 	update := &protocol.BackendUpdate{
 		Type:        protocol.TypeBackendUpdate,
 		Version:     version,
@@ -669,10 +750,19 @@ func (g *Gateway) PushBackendUpdate(version, downloadURL, fallbackURL, sha256 st
 		SHA256:      sha256,
 	}
 
-	log.Info().
-		Str("version", version).
-		Str("fingerprint", wc.info.Fingerprint).
-		Msg("pushing backend update to worker")
+	g.mu.RLock()
+	defer g.mu.RUnlock()
 
-	return wc.conn.WriteJSON(update)
+	if len(g.workers) == 0 {
+		return fmt.Errorf("no worker connected")
+	}
+	var lastErr error
+	for _, wc := range g.workers {
+		log.Info().Str("version", version).Str("fingerprint", wc.info.Fingerprint).
+			Msg("pushing backend update to worker")
+		if err := wc.conn.WriteJSON(update); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
 }
