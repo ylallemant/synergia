@@ -42,16 +42,19 @@ func (u *Updater) Apply(bu *protocol.BinaryUpdate) (bool, error) {
 		Str("target", bu.Version).
 		Msg("binary update received — starting download")
 
-	// Download from primary URL (GitHub)
-	tmpPath, err := u.download(bu.DownloadURL)
+	// Download through the manager's /download endpoint first.
+	// The manager patches the sentinel bytes (WSS manager URL) into the binary
+	// before serving it, so the updated client can reconnect automatically.
+	// Only fall back to the raw upstream URL (GitHub) if the manager is unreachable.
+	managerURL := u.buildManagerDownloadURL(bu)
+	tmpPath, err := u.download(managerURL)
 	if err != nil {
-		log.Warn().Err(err).Msg("primary download failed, trying fallback")
-		// Try fallback (manager proxy)
-		fallbackURL := u.buildFallbackURL(bu)
-		tmpPath, err = u.download(fallbackURL)
+		log.Warn().Err(err).Str("fallback", bu.DownloadURL).Msg("manager download failed, trying upstream URL")
+		tmpPath, err = u.download(bu.DownloadURL)
 		if err != nil {
-			return false, fmt.Errorf("both primary and fallback download failed: %w", err)
+			return false, fmt.Errorf("both manager and upstream download failed: %w", err)
 		}
+		log.Warn().Msg("binary downloaded from upstream (sentinel not patched — client may need manual reconfiguration)")
 	}
 	defer os.Remove(tmpPath) // cleanup on failure
 
@@ -124,10 +127,12 @@ func (u *Updater) download(url string) (string, error) {
 	return tmp.Name(), nil
 }
 
-func (u *Updater) buildFallbackURL(bu *protocol.BinaryUpdate) string {
-	base := u.managerHTTPURL
-	return fmt.Sprintf("%s/v1/binary/download?version=%s&os=%s&arch=%s",
-		base, bu.Version, runtime.GOOS, runtime.GOARCH)
+// buildManagerDownloadURL returns the manager's patched binary endpoint.
+// The manager patches the sentinel (WSS URL) before serving, ensuring the
+// updated client can reconnect without manual reconfiguration.
+func (u *Updater) buildManagerDownloadURL(bu *protocol.BinaryUpdate) string {
+	return fmt.Sprintf("%s/download/%s/%s?version=%s",
+		u.managerHTTPURL, runtime.GOOS, runtime.GOARCH, bu.Version)
 }
 
 func hashFile(path string) (string, error) {

@@ -107,7 +107,11 @@ func (d *DownloadAPI) BinaryHandler(w http.ResponseWriter, r *http.Request) {
 		filename += ".exe"
 	}
 
-	data, err := d.loadBinary(filename, targetOS, targetArch)
+	// Optional ?version= override — used by the updater to request a specific
+	// release rather than the currently configured target version.
+	versionOverride := r.URL.Query().Get("version")
+
+	data, err := d.loadBinary(filename, targetOS, targetArch, versionOverride)
 	if err != nil {
 		log.Warn().Err(err).Str("filename", filename).Msg("binary not available")
 		http.Error(w, "binary not available for this platform", http.StatusNotFound)
@@ -361,7 +365,10 @@ func recomputeAdHocSignature(data []byte) {
 // naturally bypassed when the target version advances. The startup version-change
 // check in main.go removes the entire cache dir when the manager itself upgrades,
 // so there is no need to manually prune old version subdirectories.
-func (d *DownloadAPI) loadBinary(filename, targetOS, targetArch string) ([]byte, error) {
+// loadBinary fetches the client binary for the given platform and version.
+// versionOverride pins a specific release; if empty the configured target version
+// (or latest available) is used.
+func (d *DownloadAPI) loadBinary(filename, targetOS, targetArch, versionOverride string) ([]byte, error) {
 	// 1. Operator-supplied prebuilt binaries (no version check)
 	localPath := filepath.Join(d.binaryDir, filename)
 	if data, err := os.ReadFile(localPath); err == nil {
@@ -369,7 +376,10 @@ func (d *DownloadAPI) loadBinary(filename, targetOS, targetArch string) ([]byte,
 	}
 
 	// 2. Determine target version before checking the cache
-	version := d.cache.GetStats().VersionTarget
+	version := versionOverride
+	if version == "" {
+		version = d.cache.GetStats().VersionTarget
+	}
 	if version == "" {
 		if tags := d.cache.GetClientTags(); len(tags) > 0 {
 			version = tags[0]
