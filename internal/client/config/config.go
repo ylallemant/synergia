@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/ylallemant/synergia/internal/client/workerstate"
 )
 
 // DefaultManagerURL is a 256-byte sentinel in the binary's __DATA segment.
@@ -128,11 +130,18 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid --gpu-resume-delay %q: %w", gpuResume, err)
 	}
 
-	// Resolve manager URL from saved file if not set
+	// Resolve manager URL: saved file takes priority, then worker-state.yaml.
 	if cfg.ManagerURL == "" {
 		if saved, err := os.ReadFile(cfg.DataDir + "/manager-url"); err == nil {
 			if url := strings.TrimSpace(string(saved)); url != "" {
 				cfg.ManagerURL = url
+			}
+		}
+	}
+	if cfg.ManagerURL == "" {
+		if ws, err := workerstate.Load(cfg.DataDir); err == nil {
+			if saved := ws.Get().ManagerURL; saved != "" {
+				cfg.ManagerURL = saved
 			}
 		}
 	}
