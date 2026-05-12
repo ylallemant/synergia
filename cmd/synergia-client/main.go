@@ -42,6 +42,7 @@ import (
 	"github.com/ylallemant/synergia/internal/client/version"
 	"github.com/ylallemant/synergia/internal/client/worker"
 	"github.com/ylallemant/synergia/internal/client/workerconfig"
+	"github.com/ylallemant/synergia/internal/client/workerstate"
 )
 
 // llamaPortFrom returns the port from an LLM URL such as "http://localhost:9877".
@@ -181,6 +182,34 @@ func main() {
 		return nil
 	}
 
+	// Load persisted worker state (manager URL, last model path, llama params, backend version).
+	// Errors loading the file are non-fatal — the client will re-sync from the manager.
+	wstate, err := workerstate.Load(cfg.DataDir)
+	if err != nil {
+		log.Warn().Err(err).Msg("could not load persisted worker state — starting fresh")
+		wstate, _ = workerstate.Load(cfg.DataDir) // returns empty store on error
+	}
+
+	// If no manager URL was passed via flag/env, fall back to the persisted one.
+	// This means the binary no longer needs sentinel patching for reconnects after updates.
+	if cfg.ManagerURL == "" {
+		if saved := wstate.Get().ManagerURL; saved != "" {
+			cfg.ManagerURL = saved
+			log.Info().Str("manager_url", cfg.ManagerURL).Msg("restored manager URL from persisted state")
+		}
+	}
+
+	// Restore the last known model file from persisted state so llama-server
+	// can start immediately after a client restart (no manager round-trip needed).
+	if cfg.ModelFile == "" {
+		if saved := wstate.Get().ModelPath; saved != "" {
+			if _, statErr := os.Stat(saved); statErr == nil {
+				cfg.ModelFile = saved
+				log.Info().Str("model_file", cfg.ModelFile).Msg("restored model file path from persisted state")
+			}
+		}
+	}
+
 	// Load or create worker identity
 	id, err := identity.LoadOrCreate(cfg.DataDir)
 	if err != nil {
@@ -221,7 +250,16 @@ func main() {
 	st := state.New(id.Fingerprint, cfg.Model, cfg.Quantisation)
 	sp := status.New(st)
 	w := worker.New(conn, llmClient, id, monitor, st, st, st, reporter, consentMgr)
-	w.SetModelDownloadConfig(cfg.Role, filepath.Dir(cfg.ModelFile), managerHTTPURL, cfg.WorkerKey)
+	w.SetWorkerState(wstate)
+	// Default models directory: {dataDir}/models/ — used when cfg.ModelFile has no directory.
+	modelsDir := filepath.Dir(cfg.ModelFile)
+	if modelsDir == "" || modelsDir == "." {
+		modelsDir = filepath.Join(cfg.DataDir, "models")
+		if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+			log.Warn().Err(err).Str("dir", modelsDir).Msg("failed to create models directory")
+		}
+	}
+	w.SetModelDownloadConfig(cfg.Role, modelsDir, managerHTTPURL, cfg.WorkerKey)
 
 	// Configure binary auto-updater
 	binaryUpdater := updater.New(cfg.WorkerKey, managerHTTPURL)
@@ -363,8 +401,23 @@ func main() {
 	// SetOnConnect fires on each connect attempt (not just the first), so a failed
 	// TOFU challenge on the first attempt is handled correctly on retry.
 	conn.SetOnConnect(func() {
+		// Persist the manager URL so subsequent restarts and binary updates
+		// can reconnect without relying on sentinel bytes in the binary.
+		if cfg.ManagerURL != "" && wstate.Get().ManagerURL != cfg.ManagerURL {
+			wstate.SetManagerURL(cfg.ManagerURL)
+		}
+
 		hasBinary := backendMgr.IsInstalled()
+		// Use the actual model file on disk as the source of truth, not just
+		// whether --model-file was passed. This correctly handles restarts where
+		// the path was restored from persisted state.
 		hasModel := cfg.ModelFile != ""
+		if hasModel {
+			if _, statErr := os.Stat(cfg.ModelFile); statErr != nil {
+				hasModel = false
+			}
+		}
+
 		if !hasBinary || !hasModel {
 			_ = conn.SendInitialSync(hasBinary, hasModel, cfg.Role)
 		} else {

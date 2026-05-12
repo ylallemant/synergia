@@ -42,19 +42,19 @@ func (u *Updater) Apply(bu *protocol.BinaryUpdate) (bool, error) {
 		Str("target", bu.Version).
 		Msg("binary update received — starting download")
 
-	// Download through the manager's /download endpoint first.
-	// The manager patches the sentinel bytes (WSS manager URL) into the binary
-	// before serving it, so the updated client can reconnect automatically.
-	// Only fall back to the raw upstream URL (GitHub) if the manager is unreachable.
-	managerURL := u.buildManagerDownloadURL(bu)
-	tmpPath, err := u.download(managerURL)
+	// Download from the upstream URL (GitHub) first — it is faster and doesn't
+	// require the manager to be reachable. The manager URL is restored from the
+	// persisted state file on restart, so sentinel patching is no longer needed
+	// for binary updates.
+	// Fall back to the manager's /download endpoint if the upstream URL fails
+	// (air-gapped workers, GitHub unavailable, etc.).
+	tmpPath, err := u.download(bu.DownloadURL)
 	if err != nil {
-		log.Warn().Err(err).Str("fallback", bu.DownloadURL).Msg("manager download failed, trying upstream URL")
-		tmpPath, err = u.download(bu.DownloadURL)
+		log.Warn().Err(err).Msg("upstream download failed, trying manager fallback")
+		tmpPath, err = u.download(u.buildManagerDownloadURL(bu))
 		if err != nil {
-			return false, fmt.Errorf("both manager and upstream download failed: %w", err)
+			return false, fmt.Errorf("both upstream and manager download failed: %w", err)
 		}
-		log.Warn().Msg("binary downloaded from upstream (sentinel not patched — client may need manual reconfiguration)")
 	}
 	defer os.Remove(tmpPath) // cleanup on failure
 

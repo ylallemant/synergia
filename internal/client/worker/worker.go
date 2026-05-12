@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -18,6 +19,7 @@ import (
 	"github.com/ylallemant/synergia/internal/client/identity"
 	"github.com/ylallemant/synergia/internal/client/llm"
 	"github.com/ylallemant/synergia/internal/client/updater"
+	"github.com/ylallemant/synergia/internal/client/workerstate"
 	"github.com/ylallemant/synergia/internal/protocol"
 )
 
@@ -81,6 +83,19 @@ type Worker struct {
 	modelsDir      string
 	managerHTTPURL string
 	workerKey      string
+
+	// Persisted state — written after every model/backend install so the
+	// client can restore its last working configuration after a restart.
+	stateStore *workerstate.Store
+
+	// Goroutine management for long-running download operations.
+	// Each handler (model, backend, binary) may only have one active
+	// download goroutine at a time; a new update cancels the previous one.
+	dlMu            sync.Mutex
+	cancelModelDL   context.CancelFunc
+	cancelBackendDL context.CancelFunc
+	cancelBinaryDL  context.CancelFunc
+	runCtx          context.Context // set by Run(), used as parent for download goroutines
 }
 
 func New(conn *connection.Connection, llmClient *llm.Client, id *identity.Identity, monitor *gpu.Monitor, counter UnitCounter, processing ProcessingTracker, pause PauseChecker, reporter ErrorReporter, consent ConsentChecker) *Worker {
@@ -105,6 +120,13 @@ func (w *Worker) SetModelDownloadConfig(role, modelsDir, managerHTTPURL, workerK
 	w.workerKey = workerKey
 }
 
+// SetWorkerState wires the persisted-state store into the worker.
+// After every successful model or backend install the worker saves the new
+// state so the client can restore it on the next restart.
+func (w *Worker) SetWorkerState(s *workerstate.Store) {
+	w.stateStore = s
+}
+
 // SetUpdater configures the binary auto-updater. restartFn is called after a successful update.
 func (w *Worker) SetUpdater(u *updater.Updater, restartFn func()) {
 	w.updater = u
@@ -124,8 +146,61 @@ func (w *Worker) SetLLMRestarter(fn func(modelPath string, p backend.LlamaParams
 	w.restartLLM = fn
 }
 
+// retryWithBackoff calls fn repeatedly until it returns nil or ctx is done.
+// Each attempt uses a child context that is cancelled after attemptTimeout.
+// On failure the worker waits for an exponentially growing delay (capped at
+// maxDelay) before the next attempt.
+func retryWithBackoff(ctx context.Context, label string, attemptTimeout, initialDelay, maxDelay time.Duration, fn func(context.Context) error) error {
+	delay := initialDelay
+	for attempt := 1; ; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		err := fn(attemptCtx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		log.Warn().Err(err).Int("attempt", attempt).Dur("retry_in", delay).
+			Msgf("%s: failed, retrying", label)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay < maxDelay {
+			delay *= 2
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+		}
+	}
+}
+
+// startDownload cancels any previous download identified by cancel, then
+// returns a new context/cancel pair derived from the Run context.
+func (w *Worker) startDownload(cancel *context.CancelFunc) (context.Context, context.CancelFunc) {
+	w.dlMu.Lock()
+	defer w.dlMu.Unlock()
+	if *cancel != nil {
+		(*cancel)()
+	}
+	parent := w.runCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, c := context.WithCancel(parent)
+	*cancel = c
+	return ctx, c
+}
+
 // Run starts the work processing loop. Blocks until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
+	w.runCtx = ctx
 	log.Info().Msg("worker processing loop started")
 
 	for {
@@ -352,15 +427,19 @@ func (w *Worker) handleModelUpdate(mu *protocol.ModelUpdate) {
 		Bool("flash_attention", mu.FlashAttention).
 		Msg("received model update — downloading and hashing model file")
 
-	// Signal that the worker is updating (unavailable for work dispatch)
+	// Signal updating immediately (synchronous, before the goroutine)
 	if err := w.conn.SendStatus("updating"); err != nil {
 		log.Warn().Err(err).Msg("failed to send updating status")
 	}
 
-	// Download the model file from the manager's model store
+	ctx, _ := w.startDownload(&w.cancelModelDL)
+	go w.applyModelUpdate(ctx, mu)
+}
+
+func (w *Worker) applyModelUpdate(ctx context.Context, mu *protocol.ModelUpdate) {
+	// No download config — trust manager's hash directly (testing / no model infra)
 	if mu.Filename == "" || w.managerHTTPURL == "" || w.modelsDir == "" {
 		log.Warn().Msg("model update: missing filename or download config, reporting expected hash")
-		// Fallback: trust the manager's expected hash (insecure, but allows testing without download infra)
 		w.conn.SetLLMHash(mu.LLMHash)
 		if err := w.conn.SendLLMHashReport(mu.LLMHash); err != nil {
 			log.Error().Err(err).Msg("failed to send LLM hash report")
@@ -370,8 +449,19 @@ func (w *Worker) handleModelUpdate(mu *protocol.ModelUpdate) {
 	}
 
 	log.Info().Str("filename", mu.Filename).Str("dest", w.modelsDir).Msg("backend: downloading model file from manager")
-	modelPath, err := w.downloadModel(mu.Filename)
+
+	var modelPath string
+	err := retryWithBackoff(ctx, "model download", 10*time.Minute, 10*time.Second, 5*time.Minute,
+		func(attemptCtx context.Context) error {
+			var dlErr error
+			modelPath, dlErr = w.downloadModel(attemptCtx, mu.Filename)
+			return dlErr
+		})
 	if err != nil {
+		if ctx.Err() != nil {
+			log.Info().Str("filename", mu.Filename).Msg("model download cancelled (superseded or shutdown)")
+			return
+		}
 		log.Error().Err(err).Str("filename", mu.Filename).Msg("failed to download model file")
 		if w.reporter != nil {
 			w.reporter.Report(err)
@@ -430,6 +520,17 @@ func (w *Worker) handleModelUpdate(mu *protocol.ModelUpdate) {
 	w.lastModelPath = modelPath
 	w.lastLlamaParams = p
 
+	// Persist so the model path and params survive a client restart.
+	if w.stateStore != nil {
+		w.stateStore.SetModel(modelPath, workerstate.LlamaParams{
+			ContextSize:    p.ContextSize,
+			ParallelSlots:  p.ParallelSlots,
+			GPULayers:      p.GPULayers,
+			EndpointType:   p.EndpointType,
+			FlashAttention: p.FlashAttention,
+		}, mu.Role)
+	}
+
 	if w.restartLLM != nil {
 		log.Info().
 			Str("model", mu.Filename).
@@ -450,7 +551,7 @@ func (w *Worker) handleModelUpdate(mu *protocol.ModelUpdate) {
 }
 
 // downloadModel downloads a model file from the manager's model store.
-func (w *Worker) downloadModel(filename string) (string, error) {
+func (w *Worker) downloadModel(ctx context.Context, filename string) (string, error) {
 	destPath := w.modelsDir + "/" + filename
 
 	// Check if file already exists
@@ -462,7 +563,7 @@ func (w *Worker) downloadModel(filename string) (string, error) {
 	url := strings.TrimSuffix(w.managerHTTPURL, "/") + "/v1/models/download/" + filename
 	log.Info().Str("url", url).Str("dest", destPath).Msg("downloading model file")
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -585,6 +686,10 @@ func (w *Worker) handleBackendUpdate(bu *protocol.BackendUpdate) {
 		// Update the connection's backend hash and version so the manager knows we're synced.
 		w.conn.SetBackendHash(w.backendMgr.Hash())
 		w.conn.SetBackendVersion(bu.Version)
+		// Persist the installed version so it survives a client restart.
+		if w.stateStore != nil {
+			w.stateStore.SetBackendVersion(bu.Version)
+		}
 		log.Info().Str("version", bu.Version).Str("hash", w.backendMgr.Hash()[:16]+"...").
 			Msg("backend: binary installed — restarting llama-server")
 
