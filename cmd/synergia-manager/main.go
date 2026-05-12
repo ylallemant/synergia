@@ -349,6 +349,11 @@ func main() {
 
 	// Administration server (separate port)
 
+	// API key stored via admin UI overrides env var at startup
+	if storedKey, err := db.GetSetting("api_key"); err == nil && storedKey != "" {
+		cfg.APIKey = storedKey
+	}
+
 	// OIDC config stored via admin UI overrides env vars at startup
 	if oidcDB, err := db.GetOIDCConfig(); err == nil && oidcDB != nil {
 		cfg.OIDCEnabled = oidcDB.Enabled
@@ -397,6 +402,8 @@ func main() {
 	adminServer.HandleFuncAdmin("/v1/admin/workers", adminWorkersAPI.ConfigHandler)
 	adminStatsAPI := adminapi.NewAdminStatsAPI(adminCache)
 	adminServer.HandleFuncAdmin("/v1/admin/stats", adminStatsAPI.StatsHandler)
+	adminAPIKeyAPI := adminapi.NewAdminAPIKeyAPI(db, adminServer.SetAPIKey)
+	adminServer.HandleFuncAdmin("/v1/admin/apikey", adminAPIKeyAPI.AdminAPIKeyHandler)
 
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

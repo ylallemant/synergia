@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -33,6 +34,7 @@ var logsTmpl = template.Must(template.ParseFS(staticFS, "static/logs.html"))
 
 // Server serves the admin dashboard and additional admin API routes.
 type Server struct {
+	mu             sync.RWMutex
 	addr           string
 	apiKey         string
 	managerVersion string
@@ -114,7 +116,20 @@ func (s *Server) HandleFunc(pattern string, handler http.HandlerFunc) {
 // Bearer token. Browser logins use the session cookie; automated / test access
 // uses Authorization: Bearer <apiKey>.
 func (s *Server) HandleFuncAdmin(pattern string, handler http.HandlerFunc) {
-	s.mux.HandleFunc(pattern, s.auth.RequireAuthOrBearer(s.apiKey, handler))
+	s.mux.HandleFunc(pattern, s.auth.RequireAuthOrBearerFn(s.getAPIKey, handler))
+}
+
+// SetAPIKey updates the Bearer token used for admin API authentication.
+func (s *Server) SetAPIKey(key string) {
+	s.mu.Lock()
+	s.apiKey = key
+	s.mu.Unlock()
+}
+
+func (s *Server) getAPIKey() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.apiKey
 }
 
 // Run starts the admin server. Blocks until ctx is cancelled.

@@ -30,6 +30,23 @@
 
 <h1>Inference</h1>
 
+<!-- ── API Key ──────────────────────────────────────────────────────────────── -->
+<h2>API Key</h2>
+<div class="form-section">
+  <div class="form-row">
+    <label for="apiKeyInput">Key</label>
+    <div class="input-with-btn">
+      <input type="password" id="apiKeyInput" style="font-family:monospace;flex:1;min-width:0" placeholder="API key">
+      <button type="button" id="toggleKeyBtn" class="btn-small" title="Show / hide key">Show</button>
+      <button type="button" id="copyKeyBtn" class="btn-small" title="Copy to clipboard">Copy</button>
+    </div>
+  </div>
+  <div class="form-actions">
+    <button type="button" id="saveKeyBtn">Save</button>
+    <span id="apiKeyStatus" class="status-msg"></span>
+  </div>
+</div>
+
 <!-- ── Backend Version ────────────────────────────────────────────────────── -->
 <h2>Backend Version</h2>
 <div class="form-section">
@@ -123,6 +140,35 @@
 <script>
 const API_KEY = "{{.APIKey}}";
 const headers = {"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"};
+
+// ── API Key ────────────────────────────────────────────────────────────────
+document.getElementById("apiKeyInput").value = API_KEY;
+document.getElementById("toggleKeyBtn").addEventListener("click", () => {
+  const inp = document.getElementById("apiKeyInput");
+  const btn = document.getElementById("toggleKeyBtn");
+  if (inp.type === "password") { inp.type = "text"; btn.textContent = "Hide"; }
+  else { inp.type = "password"; btn.textContent = "Show"; }
+});
+document.getElementById("copyKeyBtn").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(document.getElementById("apiKeyInput").value);
+    const s = document.getElementById("apiKeyStatus");
+    s.textContent = "Copied ✓"; s.className = "status-msg ok";
+    setTimeout(() => { s.textContent = ""; s.className = "status-msg"; }, 3000);
+  } catch(e) { alert("Copy failed: " + e.message); }
+});
+document.getElementById("saveKeyBtn").addEventListener("click", async () => {
+  const key = document.getElementById("apiKeyInput").value.trim();
+  const s = document.getElementById("apiKeyStatus");
+  if (!key) { s.textContent = "Key must not be empty"; s.className = "status-msg err"; return; }
+  try {
+    const resp = await fetch("/v1/admin/apikey", {method: "POST", headers, body: JSON.stringify({key})});
+    if (resp.ok) {
+      s.textContent = "Saved ✓ — reloading…"; s.className = "status-msg ok";
+      setTimeout(() => location.reload(), 1200);
+    } else { s.textContent = "Error: " + resp.status + " " + await resp.text(); s.className = "status-msg err"; }
+  } catch(e) { s.textContent = "Network error: " + e.message; s.className = "status-msg err"; }
+});
 
 // --- Nav ---
 function openNav()  { document.getElementById("navPanel").classList.add("open");  document.getElementById("navOverlay").classList.add("show"); }

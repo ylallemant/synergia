@@ -277,12 +277,18 @@ func (a *Auth) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 // Use this for admin API routes that need to support both browser sessions and
 // programmatic / automated access.
 func (a *Auth) RequireAuthOrBearer(apiKey string, next http.HandlerFunc) http.HandlerFunc {
+	return a.RequireAuthOrBearerFn(func() string { return apiKey }, next)
+}
+
+// RequireAuthOrBearerFn is like RequireAuthOrBearer but reads the API key via
+// keyFn on every request, allowing the key to be updated at runtime.
+func (a *Auth) RequireAuthOrBearerFn(keyFn func() string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if a.getSession(r) != "" {
 			next(w, r)
 			return
 		}
-		if r.Header.Get("Authorization") == "Bearer "+apiKey {
+		if r.Header.Get("Authorization") == "Bearer "+keyFn() {
 			next(w, r)
 			return
 		}
