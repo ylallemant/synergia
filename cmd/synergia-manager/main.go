@@ -216,7 +216,7 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("model store error")
 	}
-	modelsAPI := api.NewModelsDownloadAPI(gw.WorkerKey, modelStore)
+	modelsAPI := api.NewModelsDownloadAPI(gw.WorkerKey, modelStore, db)
 
 	// Compute and store file hashes for any roles that have a model filename but no file hash yet
 	roles, _ := db.GetRoleModels()
@@ -245,6 +245,29 @@ func main() {
 	versionAPI := api.NewVersionAPI()
 	backendAPI := api.NewBackendAPI(gw.WorkerKey, db, filepath.Join(cfg.CacheDir, "backend"))
 
+	// Auto-configure latest llama.cpp backend version if none is stored and not in dev mode.
+	// Dev mode supplies its own binary URL; production fresh installs need a sensible default.
+	if !cfg.Development {
+		if _, err := db.GetBackendVersionConfig(); err != nil {
+			log.Info().Msg("no backend version configured — fetching latest llama.cpp tag")
+			if tags, tagErr := backend.FetchTags(backend.LlamaCpp, 1); tagErr == nil && len(tags) > 0 {
+				latest := tags[0]
+				tpl := backend.DownloadURLTemplates[backend.LlamaCpp]
+				if setErr := db.SetBackendVersionConfig(backend.LlamaCpp, latest, tpl, ""); setErr == nil {
+					log.Info().Str("version", latest).Msg("backend version auto-configured")
+					backendAPI.PrewarmCache(latest, tpl, "")
+				}
+			} else if tagErr != nil {
+				log.Warn().Err(tagErr).Msg("could not fetch latest llama.cpp tags for auto-configure")
+			}
+		} else {
+			// Version already configured — prewarm cache in background.
+			if beCfg, cfgErr := db.GetBackendVersionConfig(); cfgErr == nil && beCfg.Version != "" {
+				backendAPI.PrewarmCache(beCfg.Version, beCfg.DownloadURL, beCfg.SHA256)
+			}
+		}
+	}
+
 	// Initialize latency monitor
 	latencyMonitor := latency.New(db, cfg.LatencyBuckets, cfg.LatencyWindowHours)
 	defer latencyMonitor.Stop()
@@ -255,6 +278,7 @@ func main() {
 	latencyAPI := adminapi.NewLatencyAPI(latencyMonitor)
 	adminVersionAPI := adminapi.NewAdminVersionAPI(db, gw, adminCache)
 	adminBackendAPI := adminapi.NewAdminBackendAPI(db, gw, adminCache)
+	adminBackendAPI.SetPrewarmer(backendAPI)
 	adminRolesAPI := adminapi.NewAdminRolesAPI(db)
 	adminRolesAPI.SetGateway(gw)
 	adminRolesAPI.SetModelStore(modelStore)

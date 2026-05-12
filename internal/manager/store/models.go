@@ -19,8 +19,9 @@ type Worker struct {
 	LLMHash           string `gorm:"size:64"`                     // SHA256 hash of role:model_file_hash reported by the worker
 	SyncStatus        string `gorm:"size:20;default:out-of-sync"` // synced, out-of-sync (manager-derived from llmHash comparison)
 	BackendHash       string `gorm:"size:64"`                     // SHA256 of the llama-server binary
+	BackendVersion    string `gorm:"size:32"`                     // version tag of the installed llama-server binary (e.g. "b9114")
 	BinarySyncStatus  string `gorm:"size:20;default:out-of-sync"` // synced, out-of-sync (version comparison)
-	BackendSyncStatus string `gorm:"size:20;default:out-of-sync"` // synced, out-of-sync (backend hash comparison)
+	BackendSyncStatus string `gorm:"size:20;default:out-of-sync"` // synced, out-of-sync (backend hash/version comparison)
 	TrustScore        int    `gorm:"default:0"`
 	TotalRequests     int64  `gorm:"default:0"`
 	TotalLatencyMs    int64  `gorm:"default:0"`
@@ -103,6 +104,7 @@ type RoleModel struct {
 	Quantisation  string `gorm:"size:20"                    json:"quantisation"`
 	ModelFilename string `gorm:"size:256"                   json:"model_filename"`
 	ModelFileHash string `gorm:"size:64"                    json:"model_file_hash"`
+	DownloadURL   string `gorm:"size:512"                   json:"download_url,omitempty"` // optional URL to fetch the model file (HuggingFace, etc.)
 	MinVRAMMB     int    `gorm:"column:min_vram_mb"         json:"min_vram_mb"`
 	Description   string `gorm:"size:256"                   json:"description"`
 	// llama-server operational parameters — sent to workers in model_update messages

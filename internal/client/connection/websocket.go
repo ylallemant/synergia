@@ -27,9 +27,10 @@ type Connection struct {
 	identity     *identity.Identity
 	model        string
 	quantisation string
-	llmHash      string
-	backendHash  string
-	gpuAvg       int
+	llmHash        string
+	backendHash    string
+	backendVersion string
+	gpuAvg         int
 	dialer       *websocket.Dialer
 
 	mu   sync.Mutex
@@ -308,14 +309,16 @@ func (c *Connection) SendStatus(state string) error {
 	c.mu.Lock()
 	hash := c.llmHash
 	backendHash := c.backendHash
+	backendVersion := c.backendVersion
 	avg := c.gpuAvg
 	c.mu.Unlock()
 	return c.Send(&protocol.Status{
-		Type:        protocol.TypeStatus,
-		State:       state,
-		LLMHash:     hash,
-		BackendHash: backendHash,
-		GPUAvg:      avg,
+		Type:           protocol.TypeStatus,
+		State:          state,
+		LLMHash:        hash,
+		BackendHash:    backendHash,
+		BackendVersion: backendVersion,
+		GPUAvg:         avg,
 	})
 }
 
@@ -360,6 +363,20 @@ func (c *Connection) GetBackendHash() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.backendHash
+}
+
+// SetBackendVersion updates the connection's installed backend version tag (thread-safe).
+func (c *Connection) SetBackendVersion(version string) {
+	c.mu.Lock()
+	c.backendVersion = version
+	c.mu.Unlock()
+}
+
+// GetBackendVersion returns the currently installed backend version tag.
+func (c *Connection) GetBackendVersion() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.backendVersion
 }
 
 // SetOnConnect registers a callback that is invoked on every successful

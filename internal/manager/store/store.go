@@ -348,6 +348,16 @@ func (s *Store) UpsertRoleModel(role, model, quantisation, modelFilename, modelF
 	}).Error
 }
 
+// SetRoleDownloadURL updates the optional model download URL for an existing role.
+func (s *Store) SetRoleDownloadURL(role, downloadURL string) error {
+	return s.DB.Model(&RoleModel{}).Where("role = ?", role).Update("download_url", downloadURL).Error
+}
+
+// SetRoleModelFileHash updates the model file hash for an existing role.
+func (s *Store) SetRoleModelFileHash(role, hash string) error {
+	return s.DB.Model(&RoleModel{}).Where("role = ?", role).Update("model_file_hash", hash).Error
+}
+
 // SetRoleLlamaConfig updates the llama-server operational parameters for an existing role.
 // Called separately from UpsertRoleModel so seed callers are unaffected.
 func (s *Store) SetRoleLlamaConfig(role string, contextSize, parallelSlots, gpuLayers int, endpointType string, flashAttention bool) error {
@@ -948,7 +958,18 @@ func (s *Store) SetWorkerBackendHash(fingerprint, hash string) error {
 	return s.DB.Model(&Worker{}).Where("fingerprint = ?", fingerprint).Update("backend_hash", hash).Error
 }
 
-// UpdateWorkerBackendSyncStatus compares the worker's backend hash against the target.
+// SetWorkerBackendVersion updates the worker's reported installed backend version tag.
+func (s *Store) SetWorkerBackendVersion(fingerprint, version string) error {
+	return s.DB.Model(&Worker{}).Where("fingerprint = ?", fingerprint).Update("backend_version", version).Error
+}
+
+// MarkAllWorkersBackendOutOfSync sets backend_sync_status=out-of-sync for all non-offline workers.
+// Call this whenever the target backend version changes so stale workers are immediately visible.
+func (s *Store) MarkAllWorkersBackendOutOfSync() {
+	s.DB.Model(&Worker{}).Where("status != ?", "offline").Update("backend_sync_status", "out-of-sync")
+}
+
+// UpdateWorkerBackendSyncStatus compares the worker's backend version/hash against the target.
 func (s *Store) UpdateWorkerBackendSyncStatus(fingerprint string) string {
 	var worker Worker
 	if err := s.DB.Where("fingerprint = ?", fingerprint).First(&worker).Error; err != nil {
@@ -956,15 +977,23 @@ func (s *Store) UpdateWorkerBackendSyncStatus(fingerprint string) string {
 	}
 
 	cfg, err := s.GetBackendVersionConfig()
-	if err != nil || cfg.SHA256 == "" {
+	if err != nil {
 		// No target configured — consider synced (nothing to enforce)
 		s.DB.Model(&worker).Update("backend_sync_status", "synced")
 		return "synced"
 	}
 
 	status := "out-of-sync"
-	if worker.BackendHash == cfg.SHA256 {
-		status = "synced"
+	if cfg.SHA256 != "" {
+		// Prefer hash comparison when the admin has provided a known SHA256.
+		if worker.BackendHash == cfg.SHA256 {
+			status = "synced"
+		}
+	} else {
+		// Fall back to version tag comparison when SHA256 is not set.
+		if worker.BackendVersion != "" && worker.BackendVersion == cfg.Version {
+			status = "synced"
+		}
 	}
 
 	s.DB.Model(&worker).Update("backend_sync_status", status)

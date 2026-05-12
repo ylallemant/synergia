@@ -14,10 +14,16 @@ import (
 )
 
 // AdminBackendAPI manages backend (llama-server) version configuration.
+// BackendPrewarmer is the interface for pre-downloading backend binaries for all platforms.
+type BackendPrewarmer interface {
+	PrewarmCache(version, urlTemplate, expectedSHA256 string)
+}
+
 type AdminBackendAPI struct {
-	store   *store.Store
-	gateway *gateway.Gateway
-	cache   *cache.Cache
+	store    *store.Store
+	gateway  *gateway.Gateway
+	cache    *cache.Cache
+	prewarmer BackendPrewarmer
 }
 
 func NewAdminBackendAPI(s *store.Store, gw *gateway.Gateway, c *cache.Cache) *AdminBackendAPI {
@@ -27,6 +33,8 @@ func NewAdminBackendAPI(s *store.Store, gw *gateway.Gateway, c *cache.Cache) *Ad
 		cache:   c,
 	}
 }
+
+func (b *AdminBackendAPI) SetPrewarmer(p BackendPrewarmer) { b.prewarmer = p }
 
 type backendConfigRequest struct {
 	Name        string `json:"name"`
@@ -103,6 +111,16 @@ func (b *AdminBackendAPI) setBackend(w http.ResponseWriter, r *http.Request) {
 		log.Error().Err(err).Msg("failed to save backend version config")
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+
+	// Immediately mark all connected workers as out-of-sync so the stats
+	// reflect the new target before workers report back their installed version.
+	b.store.MarkAllWorkersBackendOutOfSync()
+
+	// Pre-download the binary for all platforms in the background so workers
+	// behind firewalls can use the manager as a fallback download source.
+	if b.prewarmer != nil {
+		b.prewarmer.PrewarmCache(req.Version, req.DownloadURL, req.SHA256)
 	}
 
 	if b.gateway != nil && b.gateway.HasWorker() {

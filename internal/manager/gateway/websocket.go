@@ -379,8 +379,10 @@ func (g *Gateway) readLoop(wc *workerConn) {
 				log.Warn().Err(err).Msg("invalid status message")
 				continue
 			}
-			log.Info().
+			log.Debug().
 				Str("state", statusMsg.State).
+				Str("backend_hash", statusMsg.BackendHash).
+				Str("backend_version", statusMsg.BackendVersion).
 				Str("fingerprint", wc.info.Fingerprint).
 				Msg("worker status update")
 			// Update LLM hash if provided in status message
@@ -388,14 +390,30 @@ func (g *Gateway) readLoop(wc *workerConn) {
 				if err := g.store.SetWorkerLLMHash(wc.info.Fingerprint, statusMsg.LLMHash); err != nil {
 					log.Error().Err(err).Msg("failed to update worker LLM hash from status")
 				}
-				g.store.UpdateWorkerSyncStatus(wc.info.Fingerprint)
+				modelSyncStatus := g.store.UpdateWorkerSyncStatus(wc.info.Fingerprint)
+				log.Info().
+					Str("model_sync_status", modelSyncStatus).
+					Str("fingerprint", wc.info.Fingerprint[:8]).
+					Msg("model sync status updated")
 			}
-			// Update backend hash if provided — workers report it after installing a new binary.
-			if statusMsg.BackendHash != "" && g.store != nil {
-				if err := g.store.SetWorkerBackendHash(wc.info.Fingerprint, statusMsg.BackendHash); err != nil {
-					log.Error().Err(err).Msg("failed to update worker backend hash from status")
+			// Update backend hash and version if provided — workers report these after installing a new binary.
+			if g.store != nil && (statusMsg.BackendHash != "" || statusMsg.BackendVersion != "") {
+				if statusMsg.BackendHash != "" {
+					if err := g.store.SetWorkerBackendHash(wc.info.Fingerprint, statusMsg.BackendHash); err != nil {
+						log.Error().Err(err).Msg("failed to update worker backend hash from status")
+					}
 				}
-				g.store.UpdateWorkerBackendSyncStatus(wc.info.Fingerprint)
+				if statusMsg.BackendVersion != "" {
+					if err := g.store.SetWorkerBackendVersion(wc.info.Fingerprint, statusMsg.BackendVersion); err != nil {
+						log.Error().Err(err).Msg("failed to update worker backend version from status")
+					}
+				}
+				backendSyncStatus := g.store.UpdateWorkerBackendSyncStatus(wc.info.Fingerprint)
+				log.Info().
+					Str("backend_version", statusMsg.BackendVersion).
+					Str("backend_sync_status", backendSyncStatus).
+					Str("fingerprint", wc.info.Fingerprint[:8]).
+					Msg("backend sync status updated")
 			}
 			// Store GPU baseline avg only when the worker has given consent —
 			// we collect the aggregate (no timeline, no peaks), never raw load curves.
@@ -433,27 +451,31 @@ func (g *Gateway) readLoop(wc *workerConn) {
 				log.Warn().Err(err).Msg("invalid llm_hash_report message")
 				continue
 			}
-			log.Info().
+			log.Debug().
 				Str("llm_hash", hashReport.LLMHash).
 				Str("fingerprint", wc.info.Fingerprint).
-				Msg("worker LLM hash report")
+				Msg("worker LLM hash report received")
 			if g.store != nil {
 				if err := g.store.SetWorkerLLMHash(wc.info.Fingerprint, hashReport.LLMHash); err != nil {
 					log.Error().Err(err).Msg("failed to update worker LLM hash")
 				}
 				// Recompute sync status after hash update
 				syncStatus := g.store.UpdateWorkerSyncStatus(wc.info.Fingerprint)
-				// Get current client status for aggregated log
+				log.Info().
+					Str("model_sync_status", syncStatus).
+					Str("llm_hash", hashReport.LLMHash[:16]+"...").
+					Str("fingerprint", wc.info.Fingerprint[:8]).
+					Msg("model sync status updated from hash report")
+				// Debug: log full aggregated state transition
 				var w store.Worker
 				clientStatus := "unknown"
 				if err := g.store.DB.Select("status").Where("fingerprint = ?", wc.info.Fingerprint).First(&w).Error; err == nil {
 					clientStatus = w.Status
 				}
-				aggregated := store.AggregatedStatus(clientStatus, syncStatus)
 				log.Debug().
 					Str("client_status", clientStatus).
 					Str("sync_status", syncStatus).
-					Str("aggregated", aggregated).
+					Str("aggregated", store.AggregatedStatus(clientStatus, syncStatus)).
 					Str("fingerprint", wc.info.Fingerprint).
 					Msg("worker status transition")
 			}
@@ -464,7 +486,7 @@ func (g *Gateway) readLoop(wc *workerConn) {
 				log.Warn().Err(err).Msg("invalid initial_sync message")
 				continue
 			}
-			log.Info().
+			log.Debug().
 				Bool("has_binary", syncReq.HasBinary).
 				Bool("has_model", syncReq.HasModel).
 				Str("role", syncReq.Role).
@@ -481,12 +503,16 @@ func (g *Gateway) readLoop(wc *workerConn) {
 					downloadURL := backend.ExpandURL(cfg.DownloadURL, cfg.Version, wc.info.OS, wc.info.Arch)
 					fallbackURL := fmt.Sprintf("/v1/backend/download?version=%s&os=%s&arch=%s",
 						cfg.Version, wc.info.OS, wc.info.Arch)
+					log.Info().
+						Str("version", cfg.Version).
+						Str("fingerprint", wc.info.Fingerprint[:8]).
+						Msg("initial_sync: pushing backend binary to worker")
 					if err := g.PushBackendUpdate(cfg.Version, downloadURL, fallbackURL, cfg.SHA256); err != nil {
 						log.Error().Err(err).Msg("initial_sync: failed to push backend update")
 					}
 				} else {
 					log.Info().Str("fingerprint", wc.info.Fingerprint[:8]).
-						Msg("initial_sync: no backend version configured, skipping")
+						Msg("initial_sync: no backend version configured — worker cannot receive llama-server")
 				}
 			}
 
@@ -495,21 +521,39 @@ func (g *Gateway) readLoop(wc *workerConn) {
 			// Always push when binary is absent — the model update triggers
 			// restartLLM which starts llama-server once the binary is installed.
 			if syncReq.Role != "" {
-				if rm, err := g.store.GetRoleModel(syncReq.Role); err == nil && rm != nil && rm.ModelFileHash != "" {
-					llmHash := protocol.ComputeLLMHash(syncReq.Role, rm.ModelFileHash)
-					var w store.Worker
+				if rm, err := g.store.GetRoleModel(syncReq.Role); err == nil && rm != nil {
+					// Compute expected LLM hash only when the file hash is known.
+					// When it is empty (model not yet downloaded by the manager) we
+					// still push the ModelUpdate so the client can download the file
+					// and report back its own hash.
+					llmHash := ""
 					workerHash := ""
-					if err2 := g.store.DB.Select("llm_hash").Where("fingerprint = ?", wc.info.Fingerprint).First(&w).Error; err2 == nil {
-						workerHash = w.LLMHash
+					if rm.ModelFileHash != "" {
+						llmHash = protocol.ComputeLLMHash(syncReq.Role, rm.ModelFileHash)
+						var w store.Worker
+						if err2 := g.store.DB.Select("llm_hash").Where("fingerprint = ?", wc.info.Fingerprint).First(&w).Error; err2 == nil {
+							workerHash = w.LLMHash
+						}
 					}
-					needsModel := !syncReq.HasBinary || !syncReq.HasModel || workerHash != llmHash
+					needsModel := !syncReq.HasBinary || !syncReq.HasModel || (llmHash != "" && workerHash != llmHash)
 					if needsModel {
+						log.Info().
+							Str("role", syncReq.Role).
+							Str("model", rm.LLMModel).
+							Str("filename", rm.ModelFilename).
+							Str("fingerprint", wc.info.Fingerprint[:8]).
+							Msg("initial_sync: pushing model update to worker")
 						if err := g.PushModelUpdate(syncReq.Role, rm.LLMModel, rm.Quantisation,
 							rm.ModelFilename, rm.ModelFileHash, llmHash,
 							rm.ContextSize, rm.ParallelSlots, rm.GPULayers,
 							rm.EndpointType, rm.FlashAttention); err != nil {
 							log.Error().Err(err).Msg("initial_sync: failed to push model update")
 						}
+					} else {
+						log.Info().
+							Str("role", syncReq.Role).
+							Str("fingerprint", wc.info.Fingerprint[:8]).
+							Msg("initial_sync: model already in sync, no push needed")
 					}
 				} else {
 					log.Info().Str("role", syncReq.Role).Str("fingerprint", wc.info.Fingerprint[:8]).

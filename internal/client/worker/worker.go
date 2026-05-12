@@ -582,8 +582,9 @@ func (w *Worker) handleBackendUpdate(bu *protocol.BackendUpdate) {
 	}
 
 	if updated {
-		// Update the connection's backend hash so the manager knows we're synced
+		// Update the connection's backend hash and version so the manager knows we're synced.
 		w.conn.SetBackendHash(w.backendMgr.Hash())
+		w.conn.SetBackendVersion(bu.Version)
 		log.Info().Str("version", bu.Version).Str("hash", w.backendMgr.Hash()[:16]+"...").
 			Msg("backend: binary installed — restarting llama-server")
 

@@ -75,6 +75,7 @@ body { padding-top: calc(52px + 2rem); }
 .notice { padding: 0.75rem 1rem; border-radius: 6px; font-size: 0.85rem; margin-bottom: 1.25rem; }
 .notice-ok   { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
 .notice-info { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+.notice-warn { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
 .field-hint { font-size: 0.75rem; color: #888; padding-left: calc(140px + 0.75rem); margin-bottom: 0.4rem; line-height: 1.5; }
 .field-hint code { background: #f3f4f6; padding: 0.1rem 0.3rem; border-radius: 3px; font-family: "SF Mono","Fira Code",monospace; font-size: 0.8rem; }
 .toggle { display: inline-flex; align-items: center; cursor: pointer; }

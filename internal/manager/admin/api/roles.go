@@ -11,6 +11,33 @@ import (
 	"github.com/ylallemant/synergia/internal/protocol"
 )
 
+// downloadModelInBackground fetches a model file from downloadURL, saves it to the
+// model store, computes its SHA256, and updates the role's ModelFileHash in the DB.
+// Intended to be called as a goroutine; errors are logged, never returned.
+func (r *AdminRolesAPI) downloadModelInBackground(role, filename, downloadURL string) {
+	log.Info().Str("role", role).Str("filename", filename).Str("url", downloadURL).Msg("downloading model file for role")
+	resp, err := http.Get(downloadURL) //nolint:gosec
+	if err != nil {
+		log.Error().Err(err).Str("url", downloadURL).Msg("model download: request failed")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Error().Int("status", resp.StatusCode).Str("url", downloadURL).Msg("model download: upstream error")
+		return
+	}
+	hash, err := r.modelStore.Save(context.Background(), filename, resp.Body)
+	if err != nil {
+		log.Error().Err(err).Str("filename", filename).Msg("model download: save failed")
+		return
+	}
+	if err := r.store.SetRoleModelFileHash(role, hash); err != nil {
+		log.Error().Err(err).Str("role", role).Msg("model download: failed to store file hash")
+		return
+	}
+	log.Info().Str("role", role).Str("filename", filename).Str("hash", hash[:16]+"...").Msg("model downloaded and hash stored")
+}
+
 // ModelUpdatePusher is the interface for pushing model updates to connected workers.
 type ModelUpdatePusher interface {
 	PushModelUpdate(role, model, quantisation, filename, modelFileHash, llmHash string, contextSize, parallelSlots, gpuLayers int, endpointType string, flashAttention bool) error
@@ -49,6 +76,7 @@ func (r *AdminRolesAPI) AdminRolesHandler(w http.ResponseWriter, req *http.Reque
 			Quantisation  string `json:"quantisation"`
 			Filename      string `json:"filename"`
 			ModelFileHash string `json:"model_file_hash"`
+			DownloadURL   string `json:"download_url"`
 			MinVRAMMB     int    `json:"min_vram_mb"`
 			Description   string `json:"description"`
 			// llama-server operational parameters
@@ -85,6 +113,9 @@ func (r *AdminRolesAPI) AdminRolesHandler(w http.ResponseWriter, req *http.Reque
 			return
 		}
 		_ = r.store.SetRoleLlamaConfig(req2.Role, req2.ContextSize, req2.ParallelSlots, req2.GPULayers, req2.EndpointType, req2.FlashAttention)
+		if req2.DownloadURL != "" {
+			_ = r.store.SetRoleDownloadURL(req2.Role, req2.DownloadURL)
+		}
 		log.Info().Str("role", req2.Role).Str("model", req2.Model).Str("endpoint", req2.EndpointType).Int("ctx", req2.ContextSize).Msg("role-model mapping updated")
 
 		if req2.ModelFileHash == "" && req2.Filename != "" && r.modelStore != nil {
@@ -92,8 +123,12 @@ func (r *AdminRolesAPI) AdminRolesHandler(w http.ResponseWriter, req *http.Reque
 				req2.ModelFileHash = hash
 				_ = r.store.UpsertRoleModel(req2.Role, req2.Model, req2.Quantisation, req2.Filename, hash, req2.MinVRAMMB, req2.Description)
 				log.Info().Str("role", req2.Role).Str("hash", hash[:16]+"...").Msg("computed model file hash from store")
+			} else if req2.DownloadURL != "" {
+				// File not in store yet — trigger background download so the hash
+				// is computed and the fallback endpoint can serve it to workers.
+				go r.downloadModelInBackground(req2.Role, req2.Filename, req2.DownloadURL)
 			} else {
-				log.Warn().Err(hashErr).Str("filename", req2.Filename).Msg("could not compute model file hash from store")
+				log.Warn().Err(hashErr).Str("filename", req2.Filename).Msg("could not compute model file hash from store — no download URL provided")
 			}
 		}
 

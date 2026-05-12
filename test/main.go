@@ -49,6 +49,10 @@ const (
 	managerAddr         = "127.0.0.1:7500"
 	managerAdminAddr    = "127.0.0.1:7501"
 	managerRedirectAddr = "127.0.0.1:7080"
+	// Test-specific client ports — deliberately different from the defaults (9876/9877)
+	// so the test never conflicts with a production Synergia client running on the same machine.
+	clientDashboardAddr = "127.0.0.1:7502"
+	clientLlamaAddr     = "127.0.0.1:7503"
 	apiKey              = "test-api-key"
 	workerKey           = "test-worker-key"
 	adminUser           = "admin"
@@ -206,6 +210,9 @@ func main() {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		fatal("create logs dir: %v", err)
 	}
+	if lf := addLogFile(filepath.Join(logDir, "test-run.log")); lf != nil {
+		defer lf.Close()
+	}
 
 	// Clean up old runs (keep last 3)
 	cleanupOldRuns(filepath.Join(testDir, "runs"), 3)
@@ -239,7 +246,7 @@ func main() {
 
 	// Pre-flight: kill any stale processes holding required ports.
 	// 9877 is where the client will start its own llama-server.
-	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, "127.0.0.1:9877", "127.0.0.1:9876"} {
+	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, clientLlamaAddr, clientDashboardAddr} {
 		freePort(addr)
 	}
 
@@ -372,7 +379,8 @@ func main() {
 	defer clientLogs.Close()
 	clientCmd := exec.Command("go", "run", "./cmd/synergia-client",
 		"--manager-url", "wss://"+managerAddr+"/ws/worker",
-		// no --llm-url: client manages its own llama-server on port 9877
+		"--llm-url", "http://"+clientLlamaAddr,
+		"--dashboard-addr", clientDashboardAddr,
 		"--model", testModelName,
 		"--quantisation", testQuantisation,
 		"--role", "embedding",
@@ -471,7 +479,7 @@ func main() {
 		defer tofuClientLogs.Close()
 		tofuClientCmd := exec.Command("go", "run", "./cmd/synergia-client",
 			"--manager-url", "wss://"+tofuManagerAddr+"/ws/worker",
-			// no --llm-url: TOFU test is auth-only; client probes default port 9877
+			"--dashboard-addr", "127.0.0.1:7504", // auth-only test; unique port avoids conflict
 			"--model", testModelName,
 			"--quantisation", testQuantisation,
 			"--role", "tester",
@@ -533,11 +541,11 @@ func main() {
 
 	// Wait for the main client's llama-server to be healthy before sending completions.
 	// The TOFU test ran concurrently with llama-server loading, so it may still be starting up.
-	if err := waitForHTTP("http://127.0.0.1:9877/health", 120*time.Second); err != nil {
+	if err := waitForHTTP("http://"+clientLlamaAddr+"/health", 120*time.Second); err != nil {
 		clientLogs.Dump(os.Stderr)
-		fatal("llama-server not ready on port 9877: %v", err)
+		fatal("llama-server not ready on port "+clientLlamaAddr+": %v", err)
 	}
-	pass("llama-server ready on port 9877")
+	pass("llama-server ready on port "+clientLlamaAddr+"")
 
 	// --- Step 8: Check worker appears in API ---
 	step("8. Verifying worker in cluster API")
@@ -929,7 +937,7 @@ func main() {
 		step("17. Testing consent withdrawal, 429 rejection, and re-accept")
 
 		// 17a: Revoke consent via client dashboard API
-		withdrawErr := postConsentToClient("http://127.0.0.1:9876/api/consent", false)
+		withdrawErr := postConsentToClient("http://"+clientDashboardAddr+"/api/consent", false)
 		if withdrawErr != nil {
 			fatal("consent withdrawal failed: %v", withdrawErr)
 		}
@@ -956,7 +964,7 @@ func main() {
 		pass("Request queued via batch endpoint while withdrawn: %s", batchID)
 
 		// 17d: Re-accept consent via client dashboard API
-		acceptErr := postConsentToClient("http://127.0.0.1:9876/api/consent", true)
+		acceptErr := postConsentToClient("http://"+clientDashboardAddr+"/api/consent", true)
 		if acceptErr != nil {
 			fatal("consent re-accept failed: %v", acceptErr)
 		}
@@ -1159,7 +1167,7 @@ func main() {
 			if err := waitForLogN(clientLogs, "backend: llama-server process started", 2, 120*time.Second); err != nil {
 				fatal("llama-server did not restart after b9049 upgrade: %v", err)
 			}
-			if err := waitForHTTP("http://127.0.0.1:9877/health", 120*time.Second); err != nil {
+			if err := waitForHTTP("http://"+clientLlamaAddr+"/health", 120*time.Second); err != nil {
 				fatal("llama-server not ready after b9049 upgrade: %v", err)
 			}
 			pass("llama-server restarted and ready with b9049")
@@ -1224,7 +1232,7 @@ func main() {
 			if err := waitForLogN(clientLogs, "backend: llama-server process started", 3, 120*time.Second); err != nil {
 				fatal("llama-server did not restart after b9050 upgrade: %v", err)
 			}
-			if err := waitForHTTP("http://127.0.0.1:9877/health", 120*time.Second); err != nil {
+			if err := waitForHTTP("http://"+clientLlamaAddr+"/health", 120*time.Second); err != nil {
 				fatal("llama-server not ready after b9050 upgrade: %v", err)
 			}
 			pass("llama-server restarted and ready with b9050")
@@ -1248,7 +1256,7 @@ func main() {
 	if keepAlive {
 		log.Info().Msg("")
 		log.Info().Msg("--keep-alive: services still running")
-		log.Info().Msgf("  Dashboard: http://127.0.0.1:9876/static/index.html")
+		log.Info().Msgf("  Dashboard: http://"+clientDashboardAddr+"/static/index.html")
 		log.Info().Msgf("  Admin:     https://%s/login  (user: %s / pass: %s)", managerAdminAddr, adminUser, adminPassword)
 		log.Info().Msgf("  Manager:   https://%s", managerAddr)
 		log.Info().Msg("  Press Ctrl+C or use tray → Quit to stop")
@@ -1426,22 +1434,40 @@ func cleanupOldRuns(runsDir string, keep int) {
 	}
 }
 
-func initLogger() {
-	noColor := true
-	if fi, err := os.Stdout.Stat(); err == nil {
-		noColor = (fi.Mode() & os.ModeCharDevice) == 0
-	}
+var logFormatLevel = func(i interface{}) string {
+	return strings.ToUpper(fmt.Sprintf("| %-6s|", i))
+}
 
-	output := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339, NoColor: noColor}
-	output.FormatLevel = func(i interface{}) string {
-		return strings.ToUpper(fmt.Sprintf("| %-6s|", i))
-	}
+func isTerminal() bool {
+	fi, err := os.Stdout.Stat()
+	return err == nil && (fi.Mode()&os.ModeCharDevice) != 0
+}
+
+func initLogger() {
+	output := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339, NoColor: !isTerminal()}
+	output.FormatLevel = logFormatLevel
 	zerolog.CallerMarshalFunc = func(pc uintptr, file string, line int) string {
 		return filepath.Base(file) + ":" + strconv.Itoa(line)
 	}
-
 	zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
+}
+
+// addLogFile tees the global logger to a file in addition to stdout.
+// Returns the open file so the caller can defer-close it.
+func addLogFile(path string) *os.File {
+	f, err := os.Create(path)
+	if err != nil {
+		log.Warn().Err(err).Msg("could not create test log file")
+		return nil
+	}
+	consoleOut := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339, NoColor: !isTerminal()}
+	consoleOut.FormatLevel = logFormatLevel
+	fileOut := zerolog.ConsoleWriter{Out: f, TimeFormat: time.RFC3339, NoColor: true}
+	fileOut.FormatLevel = logFormatLevel
+	multi := zerolog.MultiLevelWriter(consoleOut, fileOut)
+	log.Logger = zerolog.New(multi).With().Timestamp().Caller().Logger()
+	return f
 }
 
 func ensureModel(path string) error {
@@ -2146,7 +2172,7 @@ func runServices() {
 
 	// Pre-flight: kill any stale processes holding required ports.
 	// 9877 is the port the client uses for its own llama-server process.
-	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, "127.0.0.1:9877", "127.0.0.1:9876"} {
+	for _, addr := range []string{managerAddr, managerAdminAddr, managerRedirectAddr, clientLlamaAddr, clientDashboardAddr} {
 		freePort(addr)
 	}
 
@@ -2244,14 +2270,15 @@ func runServices() {
 	log.Info().Str("addr", managerAddr).Msg("cluster-manager ready")
 
 	// --- Start cluster-client (clean directory — no binary, no cached state) ---
-	// The client will download and start its own llama-server on port 9877,
+	// The client will download and start its own llama-server on port "+clientLlamaAddr+",
 	// exactly as it would on a real first-run installation.
 	clientDataDir := filepath.Join(dataDir, "client-data")
 	clientLogs := newLogBuffer("cluster-client", logDir)
 	defer clientLogs.Close()
 	clientCmd := exec.Command("go", "run", "./cmd/synergia-client",
 		"--manager-url", "wss://"+managerAddr+"/ws/worker",
-		// no --llm-url: client uses its default (localhost:9877) and manages the process itself
+		"--llm-url", "http://"+clientLlamaAddr,
+		"--dashboard-addr", clientDashboardAddr,
 		"--model", testModelName,
 		"--quantisation", testQuantisation,
 		"--role", "tester",
@@ -2270,7 +2297,7 @@ func runServices() {
 
 	log.Info().Msg("")
 	log.Info().Msg("All services started — bootstrapping client (binary download → model push → llama-server start)")
-	log.Info().Msgf("  Client Dashboard: http://127.0.0.1:9876/static/index.html")
+	log.Info().Msgf("  Client Dashboard: http://"+clientDashboardAddr+"/static/index.html")
 	log.Info().Msgf("  Admin Dashboard:  https://%s/login  (user: %s / pass: %s)", managerAdminAddr, adminUser, adminPassword)
 	log.Info().Msgf("  Manager API:      https://%s", managerAddr)
 	log.Info().Msg("  Press Ctrl+C or use tray → Quit to stop")
@@ -2288,10 +2315,10 @@ func runServices() {
 		clientLogs.Dump(os.Stderr)
 		fatal("client did not start llama-server via InitialSync: %v", err)
 	}
-	if err := waitForHTTP("http://127.0.0.1:9877/health", 120*time.Second); err != nil {
-		fatal("llama-server not ready on port 9877: %v", err)
+	if err := waitForHTTP("http://"+clientLlamaAddr+"/health", 120*time.Second); err != nil {
+		fatal("llama-server not ready on port "+clientLlamaAddr+": %v", err)
 	}
-	log.Info().Msg("llama-server started and ready on port 9877")
+	log.Info().Msg("llama-server started and ready on port "+clientLlamaAddr+"")
 
 	// Start live and batch payload senders in background.
 	stop := make(chan struct{})

@@ -44,8 +44,14 @@ import (
 	"github.com/ylallemant/synergia/internal/client/workerconfig"
 )
 
-const dashboardAddr = "127.0.0.1:9876"
-const llamaPort = "9877"
+// llamaPortFrom returns the port from an LLM URL such as "http://localhost:9877".
+// Falls back to "9877" if the URL cannot be parsed or has no explicit port.
+func llamaPortFrom(llmURL string) string {
+	if u, err := url.Parse(llmURL); err == nil && u.Port() != "" {
+		return u.Port()
+	}
+	return "9877"
+}
 
 // initLogger sets up zerolog. extra writers (e.g. a log file) are added after
 // the console and ring buffer. Call it twice: once before config.Load(), and
@@ -241,7 +247,7 @@ func main() {
 	default:
 		log.Info().Str("binary", backendMgr.BinaryPath()).Str("model", cfg.ModelFile).
 			Msg("backend: binary and model file present — starting llama-server")
-		if err := backendMgr.Start(llamaPort, cfg.ModelFile, backend.DefaultLlamaParams()); err != nil {
+		if err := backendMgr.Start(llamaPortFrom(cfg.LLMURL), cfg.ModelFile, backend.DefaultLlamaParams()); err != nil {
 			log.Warn().Err(err).Msg("backend: failed to start llama-server — will retry after next model update")
 		}
 	}
@@ -252,12 +258,12 @@ func main() {
 	})
 	w.SetLLMRestarter(func(modelPath string, p backend.LlamaParams) error {
 		// Model updated — restart with the new model file and manager-supplied parameters.
-		return backendMgr.Start(llamaPort, modelPath, p)
+		return backendMgr.Start(llamaPortFrom(cfg.LLMURL), modelPath, p)
 	})
 
-	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath, cfg.DataDir)
+	srv := server.New(cfg.DashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath, cfg.DataDir)
 	adminURL := localAdminURL(cfg.ManagerURL, cfg.WorkerKey)
-	t := tray.New(sp, "http://"+dashboardAddr+"/static/index.html", adminURL)
+	t := tray.New(sp, "http://"+cfg.DashboardAddr+"/static/index.html", adminURL)
 
 	// When the user uninstalls via the dashboard, notify the manager with a
 	// signed goodbye message so it marks the worker as "deleted".
@@ -293,7 +299,7 @@ func main() {
 		Str("model", cfg.Model).
 		Str("quantisation", cfg.Quantisation).
 		Str("version", version.Version).
-		Str("dashboard", "http://"+dashboardAddr).
+		Str("dashboard", "http://"+cfg.DashboardAddr).
 		Bool("consent_accepted", consentMgr.IsAccepted()).
 		Msg("cluster client starting")
 
@@ -305,7 +311,7 @@ func main() {
 	if !consentMgr.IsAccepted() && !cfg.AutoApprove {
 		go func() {
 			time.Sleep(500 * time.Millisecond)
-			dashURL := "http://" + dashboardAddr + "/static/index.html"
+			dashURL := "http://" + cfg.DashboardAddr + "/static/index.html"
 			if err := browser.Open(dashURL); err != nil {
 				log.Warn().Err(err).Msg("failed to open browser")
 			}
@@ -424,7 +430,7 @@ func main() {
 // the process can restart with the new configuration (via autostart or manually).
 func runUnconfigured(cfg *config.Config, logBuf *logbuffer.Buffer, logFilePath string) {
 	log.Warn().Msg("no manager URL configured — starting in setup mode")
-	log.Info().Str("dashboard", "http://"+dashboardAddr+"/static/index.html").Msg("open the dashboard to configure the manager URL")
+	log.Info().Str("dashboard", "http://"+cfg.DashboardAddr+"/static/index.html").Msg("open the dashboard to configure the manager URL")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -443,7 +449,7 @@ func runUnconfigured(cfg *config.Config, logBuf *logbuffer.Buffer, logFilePath s
 	brandingMgr := branding.New(cfg.DataDir, "", "")
 	autostartMgr := autostart.New(execPath(), os.Args[1:])
 
-	srv := server.New(dashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath, cfg.DataDir)
+	srv := server.New(cfg.DashboardAddr, sp, consentMgr, configMgr, brandingMgr, autostartMgr, logBuf, logFilePath, cfg.DataDir)
 
 	// When user submits a URL, save it to a config file and exit for restart
 	srv.SetManagerURLCallback(func(managerURL string) {
@@ -461,7 +467,7 @@ func runUnconfigured(cfg *config.Config, logBuf *logbuffer.Buffer, logFilePath s
 	// Auto-open browser
 	go func() {
 		time.Sleep(500 * time.Millisecond) // give server time to bind
-		dashURL := "http://" + dashboardAddr + "/static/index.html"
+		dashURL := "http://" + cfg.DashboardAddr + "/static/index.html"
 		if err := browser.Open(dashURL); err != nil {
 			log.Warn().Err(err).Msg("failed to open browser")
 		}

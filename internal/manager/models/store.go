@@ -36,6 +36,10 @@ type Store interface {
 
 	// FileHash computes and returns the SHA256 hex hash of the specified model file.
 	FileHash(ctx context.Context, filename string) (string, error)
+
+	// Save writes the contents of r to the store under filename.
+	// Returns the SHA256 hex hash of the saved file.
+	Save(ctx context.Context, filename string, r io.Reader) (string, error)
 }
 
 // NewFilesystemStore creates a store backed by a local directory.
@@ -106,6 +110,29 @@ func (s *FilesystemStore) FileHash(ctx context.Context, filename string) (string
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", fmt.Errorf("hash model file %s: %w", filename, err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func (s *FilesystemStore) Save(ctx context.Context, filename string, r io.Reader) (string, error) {
+	filename = filepath.Base(filename)
+	filePath := filepath.Join(s.path, filename)
+
+	tmp := filePath + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(f, h), r); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return "", fmt.Errorf("write model file: %w", err)
+	}
+	f.Close()
+	if err := os.Rename(tmp, filePath); err != nil {
+		os.Remove(tmp)
+		return "", fmt.Errorf("rename model file: %w", err)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -202,6 +229,24 @@ func (s *S3Store) FileHash(ctx context.Context, filename string) (string, error)
 	h := sha256.New()
 	if _, err := io.Copy(h, obj); err != nil {
 		return "", fmt.Errorf("hash model file %s: %w", filename, err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func (s *S3Store) Save(ctx context.Context, filename string, r io.Reader) (string, error) {
+	filename = filepath.Base(filename)
+	// Buffer to S3 via a pipe so we can hash in-flight.
+	pr, pw := io.Pipe()
+	h := sha256.New()
+	go func() {
+		_, err := io.Copy(io.MultiWriter(pw, h), r)
+		pw.CloseWithError(err)
+	}()
+	_, err := s.client.PutObject(ctx, s.bucket, filename, pr, -1, minio.PutObjectOptions{
+		ContentType: "application/octet-stream",
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload model file to S3: %w", err)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

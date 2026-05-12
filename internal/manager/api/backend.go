@@ -169,3 +169,31 @@ func ExpandBackendURL(template, version, goos, goarch string) string {
 
 // DefaultBackendDownloadURL is the standard llama.cpp release URL template.
 const DefaultBackendDownloadURL = "https://github.com/ggml-org/llama.cpp/releases/download/{version}/llama-{version}-bin-{platform}-{arch}.{ext}"
+
+// PrewarmCache downloads the backend binary for all supported platforms in the background
+// so workers behind firewalls can use the manager as a fallback download source.
+var prewarmPlatforms = [][2]string{
+	{"darwin", "arm64"},
+	{"darwin", "amd64"},
+	{"linux", "amd64"},
+	{"linux", "arm64"},
+}
+
+func (b *BackendAPI) PrewarmCache(version, urlTemplate, expectedSHA256 string) {
+	for _, p := range prewarmPlatforms {
+		goos, goarch := p[0], p[1]
+		go func(goos, goarch string) {
+			cacheKey := fmt.Sprintf("%s-%s-%s", version, goos, goarch)
+			b.mu.RLock()
+			_, cached := b.cacheMap[cacheKey]
+			b.mu.RUnlock()
+			if cached {
+				return
+			}
+			url := backend.ExpandURL(urlTemplate, version, goos, goarch)
+			if _, err := b.fetchAndCache(url, cacheKey, expectedSHA256); err != nil {
+				log.Warn().Err(err).Str("platform", goos+"/"+goarch).Str("version", version).Msg("backend prewarm: download failed")
+			}
+		}(goos, goarch)
+	}
+}

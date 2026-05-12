@@ -83,6 +83,7 @@ type Config struct {
 	Role                string
 	ModelFile           string
 	DataDir             string
+	DashboardAddr       string
 	GPUMonitorInterval  time.Duration
 	GPUContentionThresh int
 	GPUResumeDelay      time.Duration
@@ -104,6 +105,7 @@ func Load() (*Config, error) {
 	flag.StringVar(&cfg.Role, "role", envOrDefault("WORKER_ROLE", "tester"), "Worker role (embedding, inference, ingestion, tester)")
 	flag.StringVar(&cfg.ModelFile, "model-file", os.Getenv("WORKER_MODEL_FILE"), "Path to the GGUF model file (for hash verification)")
 	flag.StringVar(&cfg.DataDir, "data-dir", envOrDefault("CLUSTER_CLIENT_DATA_DIR", defaultDataDir()), "Directory for identity keystore and local state")
+	flag.StringVar(&cfg.DashboardAddr, "dashboard-addr", envOrDefault("CLUSTER_DASHBOARD_ADDR", "127.0.0.1:9876"), "Listen address for the local client dashboard")
 	flag.BoolVar(&cfg.AutoApprove, "auto-approve", envOrDefault("CLUSTER_CLIENT_AUTO_APPROVE", "") == "true", "Automatically accept data collection terms (for testing)")
 	flag.BoolVar(&cfg.Insecure, "insecure", envOrDefault("CLUSTER_INSECURE", "") == "true", "Connect without TLS (ws:// instead of wss://)")
 	flag.StringVar(&cfg.TLSCACert, "tls-ca-cert", os.Getenv("TLS_CA_CERT"), "Path to CA certificate for verifying the manager's TLS cert")

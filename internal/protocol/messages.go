@@ -65,11 +65,12 @@ type Heartbeat struct {
 
 // Status is sent from worker to manager to report state changes.
 type Status struct {
-	Type        string `json:"type"`
-	State       string `json:"state"`                  // "available", "processing", "busy", "updating", "paused", "withdrawn"
-	LLMHash     string `json:"llm_hash,omitempty"`     // worker's current LLM hash
-	BackendHash string `json:"backend_hash,omitempty"` // SHA256 of the installed llama-server binary
-	GPUAvg      int    `json:"gpu_avg,omitempty"`      // rolling baseline mean (bottom-85th-pct), excl. peaks
+	Type           string `json:"type"`
+	State          string `json:"state"`                     // "available", "processing", "busy", "updating", "paused", "withdrawn"
+	LLMHash        string `json:"llm_hash,omitempty"`        // worker's current LLM hash
+	BackendHash    string `json:"backend_hash,omitempty"`    // SHA256 of the installed llama-server binary
+	BackendVersion string `json:"backend_version,omitempty"` // version tag of the installed llama-server binary (e.g. "b9114")
+	GPUAvg         int    `json:"gpu_avg,omitempty"`         // rolling baseline mean (bottom-85th-pct), excl. peaks
 }
 
 // ModelUpdate is sent from manager to worker when a role-model mapping changes.
