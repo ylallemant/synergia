@@ -353,6 +353,34 @@ func (s *Store) SetRoleDownloadURL(role, downloadURL string) error {
 	return s.DB.Model(&RoleModel{}).Where("role = ?", role).Update("download_url", downloadURL).Error
 }
 
+// knownModelURLs maps our canonical model filenames to their HuggingFace download URLs.
+// The remote filename may differ from the local one; downloadModelFile always stores
+// under the local name, so this mismatch is harmless.
+var knownModelURLs = map[string]string{
+	"SmolLM2-135M-Instruct-Q4_K_M.gguf":           "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q4_K_M.gguf",
+	"bge-m3-Q4_K_M.gguf":                           "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf",
+	"mistral-nemo-12b-instruct-Q4_K_M.gguf":        "https://huggingface.co/bartowski/Mistral-Nemo-Instruct-2407-GGUF/resolve/main/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf",
+	"mistral-small-3.1-24b-instruct-Q4_K_M.gguf":   "https://huggingface.co/bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF/resolve/main/Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf",
+}
+
+// FillMissingDownloadURLs backfills HuggingFace download URLs for any role whose
+// DownloadURL is empty but whose ModelFilename appears in knownModelURLs.
+// Safe to call on every startup — roles with a URL already set are untouched.
+func (s *Store) FillMissingDownloadURLs() {
+	roles, err := s.GetRoleModels()
+	if err != nil {
+		return
+	}
+	for _, rm := range roles {
+		if rm.DownloadURL != "" || rm.ModelFilename == "" {
+			continue
+		}
+		if url, ok := knownModelURLs[rm.ModelFilename]; ok {
+			_ = s.SetRoleDownloadURL(rm.Role, url)
+		}
+	}
+}
+
 // SetRoleModelFileHash updates the model file hash for an existing role.
 func (s *Store) SetRoleModelFileHash(role, hash string) error {
 	return s.DB.Model(&RoleModel{}).Where("role = ?", role).Update("model_file_hash", hash).Error

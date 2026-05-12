@@ -145,6 +145,9 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to seed tester role")
 	}
 
+	// Backfill HuggingFace download URLs for any role that is missing one.
+	db.FillMissingDownloadURLs()
+
 	// Development mode: auto-configure backend binary version and client version target
 	// so workers can perform a full InitialSync without admin intervention.
 	if cfg.Development {
