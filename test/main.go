@@ -137,17 +137,50 @@ func (lb *logBuffer) Dump(w io.Writer) {
 func main() {
 	keepAlive := false
 	runOnly := false
-	for _, arg := range os.Args[1:] {
-		if arg == "--keep-alive" || arg == "-keep-alive" {
+	sendOnly := false
+	var sendEndpoint, sendKey, sendModel string
+
+	args := os.Args[1:]
+	for i, arg := range args {
+		switch arg {
+		case "--keep-alive", "-keep-alive":
 			keepAlive = true
-		}
-		if arg == "--run" || arg == "-run" {
+		case "--run", "-run":
 			runOnly = true
+		case "--send", "-send":
+			sendOnly = true
+		case "--endpoint", "-endpoint":
+			if i+1 < len(args) {
+				sendEndpoint = args[i+1]
+			}
+		case "--key", "-key":
+			if i+1 < len(args) {
+				sendKey = args[i+1]
+			}
+		case "--model", "-model":
+			if i+1 < len(args) {
+				sendModel = args[i+1]
+			}
 		}
 	}
 
 	if runOnly {
 		runServices()
+		return
+	}
+
+	if sendOnly {
+		if sendEndpoint == "" {
+			fmt.Fprintln(os.Stderr, "usage: go run ./test --send --endpoint https://synergia.example.com/ [--key API_KEY] [--model MODEL_NAME]")
+			os.Exit(1)
+		}
+		if sendKey == "" {
+			sendKey = os.Getenv("CLUSTER_API_KEY")
+		}
+		if sendModel == "" {
+			sendModel = testModelName
+		}
+		sendPayloads(sendEndpoint, sendKey, sendModel)
 		return
 	}
 
@@ -1995,6 +2028,102 @@ func packageBinaryWithLibs(llamaBin string) ([]byte, error) {
 // without running any tests. The client manages its own llama-server binary
 // (downloaded from the manager on first connect), mirroring the production
 // first-start flow. If any process exits, the others are stopped.
+// sendPayloads continuously sends live and batch completion requests to a real
+// cluster endpoint. Useful for manual load / smoke testing against production.
+//
+//	go run ./test --send --endpoint https://synergia.example.com/ --key <api-key>
+func sendPayloads(baseURL, key, model string) {
+	initLogger()
+
+	base := strings.TrimRight(baseURL, "/")
+	log.Info().Str("endpoint", base).Str("model", model).
+		Msg("=== Synergia Send Mode — sending payloads continuously (Ctrl-C to stop) ===")
+
+	stop := make(chan struct{})
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		close(stop)
+	}()
+
+	runPayloadLoop(base+"/v1/chat/completions", base+"/v1/batches", key, model, stop)
+	log.Info().Msg("send mode stopped")
+}
+
+// runPayloadLoop runs live completion and batch request senders until stop is closed.
+// It blocks until stop is closed, so callers that want background behaviour should
+// wrap it in a goroutine.
+func runPayloadLoop(completionsURL, batchURL, key, model string, stop <-chan struct{}) {
+	liveMessages := []string{
+		"What is 2+2? Reply with just the number.",
+		"Summarize the following text in one sentence: " + strings.Repeat("The quick brown fox jumps over the lazy dog. ", 20),
+		"Explain the key themes in this essay: " + strings.Repeat("Artificial intelligence is transforming the way we approach complex problems in science, medicine, and engineering. ", 40),
+		"Write a haiku about programming.",
+		"List the first 5 prime numbers.",
+		"Translate 'hello world' into French, German, and Japanese. " + strings.Repeat("Provide context and etymology for each translation. ", 15),
+	}
+	batchMessages := []string{
+		"What is the speed of light?",
+		"Name three planets in our solar system.",
+		"What year did the French Revolution start?",
+		"Define the word 'ephemeral'.",
+		"What is the square root of 144?",
+	}
+
+	var liveCount int64
+
+	// Live sender goroutine
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			msg := liveMessages[rand.Intn(len(liveMessages))]
+			_, err := sendCompletionWithMessage(completionsURL, key, model, msg)
+			if err != nil {
+				log.Warn().Err(err).Msg("payload failed")
+			} else {
+				liveCount++
+				if liveCount%10 == 0 {
+					log.Info().Int64("count", liveCount).Msg("payloads sent")
+				}
+			}
+			delay := time.Duration(1000+rand.Intn(3000)) * time.Millisecond
+			select {
+			case <-stop:
+				return
+			case <-time.After(delay):
+			}
+		}
+	}()
+
+	// Batch sender goroutine
+	go func() {
+		for {
+			delay := time.Duration(10+rand.Intn(11)) * time.Second
+			select {
+			case <-stop:
+				return
+			case <-time.After(delay):
+			}
+			count := 1 + rand.Intn(5)
+			for i := 0; i < count; i++ {
+				msg := batchMessages[rand.Intn(len(batchMessages))]
+				_, err := submitBatchRequest(batchURL, key, model, msg)
+				if err != nil {
+					log.Warn().Err(err).Msg("batch submit failed")
+				}
+			}
+			log.Info().Int("submitted", count).Msg("batch requests sent")
+		}
+	}()
+
+	<-stop
+}
+
 func runServices() {
 	initLogger()
 
@@ -2164,70 +2293,10 @@ func runServices() {
 	}
 	log.Info().Msg("llama-server started and ready on port 9877")
 
-	// Background payload sender
+	// Start live and batch payload senders in background.
 	stop := make(chan struct{})
-	go func() {
-		messages := []string{
-			"What is 2+2? Reply with just the number.",
-			"Summarize the following text in one sentence: " + strings.Repeat("The quick brown fox jumps over the lazy dog. ", 20),
-			"Explain the key themes in this essay: " + strings.Repeat("Artificial intelligence is transforming the way we approach complex problems in science, medicine, and engineering. ", 40),
-			"Write a haiku about programming.",
-			"List the first 5 prime numbers.",
-			"Translate 'hello world' into French, German, and Japanese. " + strings.Repeat("Provide context and etymology for each translation. ", 15),
-		}
-		var count int64
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			msg := messages[rand.Intn(len(messages))]
-			_, err := sendCompletionWithMessage("https://"+managerAddr+"/v1/chat/completions", apiKey, testModelName, msg)
-			if err != nil {
-				log.Warn().Err(err).Msg("payload failed")
-			} else {
-				count++
-				if count%10 == 0 {
-					log.Info().Int64("count", count).Msg("payloads sent")
-				}
-			}
-			delay := time.Duration(1000+rand.Intn(3000)) * time.Millisecond
-			select {
-			case <-stop:
-				return
-			case <-time.After(delay):
-			}
-		}
-	}()
-
-	// Background batch request sender
-	go func() {
-		batchMessages := []string{
-			"What is the speed of light?",
-			"Name three planets in our solar system.",
-			"What year did the French Revolution start?",
-			"Define the word 'ephemeral'.",
-			"What is the square root of 144?",
-		}
-		for {
-			delay := time.Duration(10+rand.Intn(11)) * time.Second
-			select {
-			case <-stop:
-				return
-			case <-time.After(delay):
-			}
-			count := 1 + rand.Intn(5)
-			for i := 0; i < count; i++ {
-				msg := batchMessages[rand.Intn(len(batchMessages))]
-				_, err := submitBatchRequest("https://"+managerAddr+"/v1/batches", apiKey, testModelName, msg)
-				if err != nil {
-					log.Warn().Err(err).Msg("batch submit failed")
-				}
-			}
-			log.Info().Int("submitted", count).Msg("batch requests sent")
-		}
-	}()
+	go runPayloadLoop("https://"+managerAddr+"/v1/chat/completions",
+		"https://"+managerAddr+"/v1/batches", apiKey, testModelName, stop)
 
 	// Monitor lifecycle
 	sigCh := make(chan os.Signal, 1)
