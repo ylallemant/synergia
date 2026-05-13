@@ -77,6 +77,15 @@ jobs:
           COMMIT="${GITHUB_SHA::8}"
           PKG="github.com/ylallemant/synergia/internal/client/version"
           LDFLAGS="-s -w -X ${PKG}.Version=${VERSION} -X ${PKG}.Commit=${COMMIT}"
+          # On Windows, link with the GUI subsystem so double-clicking the .exe
+          # from Explorer doesn't open a console window (and so closing the
+          # accidentally-spawned console doesn't kill the worker). The tray
+          # icon menu — including Quit — is the user-facing UI. Logs go to
+          # the data-dir's client.log; stdout/stderr go nowhere. This is the
+          # standard pattern for Go background apps on Windows.
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            LDFLAGS="${LDFLAGS} -H windowsgui"
+          fi
           TAGS="${{ matrix.tags }}"
           if [ -n "$TAGS" ]; then
             go build -tags "$TAGS" -ldflags="${LDFLAGS}" -o dist/${{ matrix.artifact }} ./cmd/synergia-client
