@@ -8,6 +8,8 @@ Read the following documents at the beginning of every session to build context 
 2. [`docs/architecture/manager/README.md`](docs/architecture/manager/README.md) — manager API, configuration, deployment
 3. [`docs/architecture/client/README.md`](docs/architecture/client/README.md) — client lifecycle, identity, consent
 
+Also read [`docs/TODO.md`](docs/TODO.md) for the current backlog and phase status.
+
 The documentation index is at [`docs/README.md`](docs/README.md).
 
 ## Project layout

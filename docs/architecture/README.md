@@ -47,7 +47,8 @@ LLM inference (especially for ingestion) is embarrassingly parallel — each doc
 | Component | Description | Details |
 |---|---|---|
 | **Cluster Manager** | Central coordinator — OpenAI-compatible API, WebSocket gateway, work queue, admin dashboard | [docs/architecture/manager/README.md](manager/README.md) |
-| **Cluster Client** | Worker daemon — connects to manager, runs local LLM inference, local dashboard | [docs/architecture/client/README.md](client/README.md) |
+| **Cluster Client** | Worker daemon — connects to manager (or proxy in Phase 3), runs local LLM inference, local dashboard | [docs/architecture/client/README.md](client/README.md) |
+| **API Proxy** *(Phase 3)* | Hardened internet-facing edge binary — the only publicly reachable component; handles worker WebSocket connections; syncs with the manager via batches only; manager never exposed to the internet | [docs/architecture/proxy/README.md](proxy/README.md) |
 | **Integration Test** | End-to-end test harness for the full pipeline | [docs/architecture/test/README.md](test/README.md) |
 
 ## Communication Protocol
@@ -152,19 +153,20 @@ Trust tiers:
 
 ### Document Classification
 
-Not all documents should be sent to community workers:
+Routing of private vs public data is handled upstream by the **Flow Engine**, not by Synergia. Private and organisational documents are sent to cloud-based GPU nodes (k8s); only public documents (scraped web, YouTube, etc.) reach the volunteer worker pool. Synergia itself never sees the classification decision.
 
-| Classification | Distributed? | Reason |
+| Classification | Where processed | Decided by |
 |---|---|---|
-| Public (scraped web, YouTube) | ✅ Yes | Already public |
-| User-uploaded (personal) | ❌ No | Privacy risk |
-| Internal (organisational) | ❌ No | Confidentiality |
+| Public (scraped web, YouTube) | Synergia volunteer pool | Flow Engine |
+| User-uploaded (personal) | Cloud k8s GPU nodes | Flow Engine |
+| Internal (organisational) | Cloud k8s GPU nodes | Flow Engine |
 
 ### Technical Mitigations
 
 - Work units contain only the **prompt text** — no metadata about source, bucket, etc.
 - Results are **ephemeral** on the worker — cleared from memory after upload
 - Client binary is **open source** for community verification
+- Volunteers identify themselves with an optional **nickname** in the client config — no account, email, or personal data required
 
 ## Incentive Model
 
@@ -220,10 +222,10 @@ Multiple concurrent workers, no trust system, no redundancy. Validates the end-t
 ### Phase 3: Production
 
 - Installer packages (.dmg, .msi)
-- Public registration + contributor agreement
-- Document classification (public vs private routing)
-- Horizontal scaling of cluster manager
-- Community stats page + leaderboard (board of fame)
+- Contributor agreement text on download page + client consent screen
+- `manager-api-proxy` — hardened internet-facing edge binary; handles all worker WebSocket connections; exchanges only batches with the manager; manager never exposed to the internet
+- Horizontal scaling of cluster manager (in-memory state + periodic DB reconciliation; proxies own the hot path)
+- Community stats page + leaderboard (board of fame; nickname-based, no registration)
 
 ### Phase 4: Advanced
 
