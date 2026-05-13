@@ -2,7 +2,7 @@
 
 Worker daemon that connects to the Cluster Manager via WebSocket, receives LLM work units, runs inference locally using `llama-server`, and returns results.
 
-See [Architecture](../architecture.md) for the full design.
+See [Architecture](../README.md) for the full design.
 
 ## Phase 1 — Proof of Concept
 
@@ -36,8 +36,9 @@ Minimal implementation: connects to a single cluster manager, shells out to a lo
 - **Binary auto-update**: receives `binary_update` push from manager, downloads new binary (GitHub releases with manager proxy fallback), verifies SHA256, self-replaces with atomic rename (Unix) or helper shim (Windows), restarts. Previous binary kept as `.bak` for rollback if reconnect fails within 60s
 - **Backend auto-update**: receives `backend_update` push from manager, downloads the full release archive (tar.gz/zip) from upstream or manager fallback, extracts all files (binaries, shared libraries, symlinks) into the backend directory, restarts `llama-server` with the new binary
 - **Windows update helper**: separate `synergia-updater.exe` handles locked-file replacement on Windows. Downloaded from the same release on first need; version kept in sync with client
-- **Pre-configured manager URL**: binary contains a sentinel placeholder (`$$SYNERGIA_MANAGER_URL$$`) that can be patched at distribution time (by the manager's download endpoint) or overridden via `--manager-url` flag / env var
-- **Unconfigured first-run**: if no manager URL is configured, the client starts in setup mode — shows a "Manager URL" field on the dashboard, does not attempt WebSocket connection until configured
+- **Pre-configured manager URL**: binary contains a sentinel placeholder (`$$SYNERGIA_MANAGER_URL$$`) patched at distribution time (manager download endpoint) or overridden via `--manager-url` flag / env var. On every successful connect the URL is also written to `worker-state.yaml`, so subsequent restarts — including after a self-update from a GitHub binary — read the URL from the state file without requiring sentinel patching
+- **Persisted worker state** (`<data-dir>/worker-state.yaml`): written on every successful connect and after model/backend installs. Stores manager URL, last assigned role, last model file path + llama-server parameters, installed backend version, and dashboard log level. Read at startup so llama-server can restart immediately without waiting for the manager to push a new `ModelUpdate`
+- **Unconfigured first-run**: if no manager URL is found in flags, env, state file, or the legacy `manager-url` file, the client starts in setup mode — shows a "Manager URL" field on the dashboard, does not attempt WebSocket connection until configured
 - **Nickname**: optional display name stored locally and synced to the manager for the community leaderboard (board of fame)
 - **Auto-open browser**: on first start (unconfigured) or when consent has not been given, automatically opens the local dashboard in the user's default browser (`open` on macOS, `xdg-open` on Linux, `start` on Windows)
 

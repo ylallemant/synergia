@@ -9,7 +9,7 @@ A SETI@home-inspired volunteer GPU compute mesh that turns idle GPUs into a shar
 
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) for the full design.
+See [docs/architecture/README.md](docs/architecture/README.md) for the full design. All documentation is indexed at [docs/README.md](docs/README.md).
 
 ```
 ┌─────────────────┐        OpenAI API          ┌──────────────────┐
@@ -34,8 +34,8 @@ See [docs/architecture.md](docs/architecture.md) for the full design.
 
 | Binary | Description |
 |---|---|
-| [`synergia-manager`](docs/manager/README.md) | Central coordinator + OpenAI-compatible API gateway |
-| [`synergia-client`](docs/client/README.md) | Worker daemon (connects to manager, runs local LLM inference) |
+| [`synergia-manager`](docs/architecture/manager/README.md) | Central coordinator + OpenAI-compatible API gateway |
+| [`synergia-client`](docs/architecture/client/README.md) | Worker daemon (connects to manager, runs local LLM inference) |
 
 ## Quick Start
 

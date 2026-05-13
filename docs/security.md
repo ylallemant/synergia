@@ -50,7 +50,7 @@ Attack surface analysis specific to the Synergia architecture, with a prioritise
 
 | Vector | Severity | Status | Notes |
 |---|---|---|---|
-| Unrestricted syscalls | Medium | TODO | No seccomp profile; see container hardening TODO in `docs/manager/README.md` |
+| Unrestricted syscalls | Medium | TODO | No seccomp profile; see container hardening TODO in `docs/architecture/manager/README.md` |
 | Writable root filesystem | Medium | TODO | Binary and config dirs are currently writable; attacker with code execution can persist malware |
 | Secrets in environment variables | Medium | Open | Env vars are readable from `/proc/self/environ` within the container; prefer mounted secret files |
 | Alpine shell available | Low | Partial | `curl` removed; shell (`/bin/sh`) and busybox remain — full shell access if container is compromised |
@@ -307,9 +307,9 @@ The API proxy tier (completions, batch) is stateless HTTP and scales horizontall
 
 The items in this file complement the implementation-level TODOs documented in:
 
-- [`docs/manager/README.md` — Container and Deployment Hardening](manager/README.md#container-and-deployment-hardening) — seccomp, read-only filesystem, secret injection, image signing
-- [`docs/manager/README.md` — Protocol TODOs](manager/README.md#challenge-response-worker-handshake-replaces-cluster_worker_key) — challenge-response, result signature verification, signed pushes, operator-signed artifacts
-- [`docs/client/README.md` — TODO / Roadmap](client/README.md#todo--roadmap) — pre-shared key elimination, signed local config, manager key pinning, work unit provenance
+- [`docs/architecture/manager/README.md` — Container and Deployment Hardening](architecture/manager/README.md#container-and-deployment-hardening) — seccomp, read-only filesystem, secret injection, image signing
+- [`docs/architecture/manager/README.md` — Protocol TODOs](architecture/manager/README.md#challenge-response-worker-handshake-replaces-cluster_worker_key) — challenge-response, result signature verification, signed pushes, operator-signed artifacts
+- [`docs/architecture/client/README.md` — TODO / Roadmap](architecture/client/README.md#todo--roadmap) — pre-shared key elimination, signed local config, manager key pinning, work unit provenance
 
 Fix priority based on exploitability × impact:
 

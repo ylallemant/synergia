@@ -2,18 +2,20 @@
 
 Central coordinator for the distributed worker network. Exposes an **OpenAI-compatible chat completion API** so the Flow Engine can use it as a drop-in LLM backend, and a **WebSocket gateway** for worker daemons to connect and receive work units.
 
-See [Architecture](../architecture.md) for the full design.
+See [Architecture](../README.md) for the full design.
 
 ## Phase 1 — Proof of Concept
 
-Minimal implementation: single worker, no trust system, no redundancy. The goal is to validate the end-to-end path: Flow Engine → Cluster Manager → Worker → local LLM → result back.
+Minimal implementation: multiple concurrent workers, no trust system, no redundancy. The goal is to validate the end-to-end path: Flow Engine → Cluster Manager → Workers → local LLM → result back.
 
 ### Scope
 
 - OpenAI-compatible `/v1/chat/completions` endpoint (blocking — waits for worker result)
 - WebSocket gateway (`/ws/worker`) for worker connections
 - In-memory work queue (no persistence — single process, no restarts)
-- Single worker support (first connected worker gets all work)
+- Multiple concurrent worker support — workers keyed by fingerprint; dispatch routes to the first available consenting worker; broadcasts (model/binary/backend updates) reach all connected workers
+- Server-side WebSocket keepalive — manager pings each worker every 20 s; if no pong within 50 s the connection is closed and the slot freed (detects dead connections behind reverse proxies)
+- Model download URL pre-seeding — known HuggingFace URLs are auto-filled for the default role-model mappings on startup
 - Basic health endpoint (`/healthz`)
 - Configuration via environment variables
 - **Worker consent API** (`/v1/consent`): gate work unit dispatch on accepted data collection consent
@@ -54,7 +56,6 @@ Minimal implementation: single worker, no trust system, no redundancy. The goal 
 - Trust scoring / redundancy / canaries
 - mTLS (Phase 1 uses TLS + shared API key auth)
 - Persistent work queue (Postgres-backed in-flight survival)
-- Multiple simultaneous workers
 - Result signature storage and verification (signatures are received but not yet persisted or validated)
 
 ## Project Structure
@@ -770,7 +771,7 @@ The manager parses the filename to extract model name and quantisation for the l
 
 ## TODO / Roadmap
 
-The items below are the manager-side counterparts of the security roadmap defined in [docs/client/README.md](../client/README.md#todo--roadmap). They are listed in the same order and require coordinated changes on both sides.
+The items below are the manager-side counterparts of the security roadmap defined in [docs/architecture/client/README.md](../client/README.md#todo--roadmap). They are listed in the same order and require coordinated changes on both sides.
 
 ---
 

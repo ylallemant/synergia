@@ -46,9 +46,9 @@ LLM inference (especially for ingestion) is embarrassingly parallel — each doc
 
 | Component | Description | Details |
 |---|---|---|
-| **Cluster Manager** | Central coordinator — OpenAI-compatible API, WebSocket gateway, work queue, admin dashboard | [docs/manager/README.md](../manager/README.md) |
-| **Cluster Client** | Worker daemon — connects to manager, runs local LLM inference, local dashboard | [docs/client/README.md](../client/README.md) |
-| **Integration Test** | End-to-end test harness for the full pipeline | [docs/test/README.md](../test/README.md) |
+| **Cluster Manager** | Central coordinator — OpenAI-compatible API, WebSocket gateway, work queue, admin dashboard | [docs/architecture/manager/README.md](manager/README.md) |
+| **Cluster Client** | Worker daemon — connects to manager, runs local LLM inference, local dashboard | [docs/architecture/client/README.md](client/README.md) |
+| **Integration Test** | End-to-end test harness for the full pipeline | [docs/architecture/test/README.md](test/README.md) |
 
 ## Communication Protocol
 
@@ -187,13 +187,14 @@ Why would someone donate their GPU?
 
 ### Phase 1: Proof of Concept ✅
 
-Single worker, no trust system, no redundancy. Validates the end-to-end path. **Implemented.**
+Multiple concurrent workers, no trust system, no redundancy. Validates the end-to-end path. **Implemented.**
 
 - OpenAI-compatible API on the manager
-- WebSocket gateway with work unit dispatch
+- WebSocket gateway with concurrent multi-worker support (keyed by fingerprint)
+- Server-side WebSocket keepalive (ping every 20 s, pongWait 50 s) to detect dead connections behind reverse proxies
 - Worker daemon with local `llama-server` integration
 - Ed25519 identity + result signing
-- Consent-gated dispatch
+- Consent-gated dispatch (routes to first available consenting worker)
 - Local dashboard on both manager (admin) and client
 - Batch queue for async processing
 - Latency monitoring with adaptive bucketing
@@ -205,15 +206,16 @@ Single worker, no trust system, no redundancy. Validates the end-to-end path. **
 - Binary auto-update (GitHub releases, manager proxy fallback, staged/full rollout)
 - Backend auto-update (llama.cpp release download, manager caching proxy, full archive extraction with symlink handling)
 - Admin configuration UI (version, backend version, role-model matrix, worker overview)
-- Full integration test suite
+- Persisted worker state (`worker-state.yaml`) — manager URL, model path, llama params, backend version, log level survive restarts
+- Model download URL pre-seeding (HuggingFace URLs auto-filled for known role-model mappings)
+- Full integration test suite (two-phase: single-worker assertions + multi-worker dispatch validation)
 
-### Phase 2: Multi-Worker
+### Phase 2: Trust & Redundancy
 
 - Trust scoring with redundancy
 - Canary system
 - mTLS certificates
 - Result signature storage and verification
-- Multiple simultaneous workers
 
 ### Phase 3: Production
 
@@ -320,6 +322,8 @@ var defaultManagerURL = "$$SYNERGIA_MANAGER_URL$$" + strings.Repeat("\x00", 224)
 ```
 
 When the manager serves `GET /download/:os/:arch`, it reads the pre-built binary, finds the sentinel, replaces it with `wss://<self-hostname>:<port>/ws/worker` (null-padded to same length), and streams the result. No per-deployment CI builds — one generic binary works for every cluster.
+
+> **Note**: sentinel patching is now a convenience rather than a hard requirement. On every successful WebSocket connect, the client persists the manager URL to `worker-state.yaml` in its data directory. Subsequent restarts (including after a binary self-update) read the URL from the state file, so the sentinel is only strictly needed on the very first connection from a GitHub-downloaded binary.
 
 ### Download Page (`/download`)
 
