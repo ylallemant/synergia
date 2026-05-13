@@ -11,6 +11,7 @@ import (
 
 	"fyne.io/systray"
 	"github.com/rs/zerolog/log"
+	"github.com/ylallemant/synergia/internal/client/proc"
 	"github.com/ylallemant/synergia/internal/client/status"
 )
 
@@ -203,7 +204,9 @@ func (t *Tray) openBrowser(url string) {
 		return
 	}
 
-	if err := exec.Command(cmd, args...).Start(); err != nil {
+	c := exec.Command(cmd, args...)
+	proc.HideWindow(c)
+	if err := c.Start(); err != nil {
 		log.Warn().Err(err).Msg("failed to open browser")
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/ylallemant/synergia/internal/client/proc"
 )
 
 const (
@@ -21,6 +23,7 @@ func (m *Manager) IsSupported() bool {
 // IsEnabled checks whether the registry Run value exists.
 func (m *Manager) IsEnabled() bool {
 	cmd := exec.Command("reg", "query", registryKey, "/v", registryValue)
+	proc.HideWindow(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return false
@@ -36,6 +39,7 @@ func (m *Manager) Enable() error {
 	}
 
 	cmd := exec.Command("reg", "add", registryKey, "/v", registryValue, "/t", "REG_SZ", "/d", execLine, "/f")
+	proc.HideWindow(cmd)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to add registry entry: %s: %w", string(out), err)
 	}
@@ -45,6 +49,7 @@ func (m *Manager) Enable() error {
 // Disable removes the registry Run entry.
 func (m *Manager) Disable() error {
 	cmd := exec.Command("reg", "delete", registryKey, "/v", registryValue, "/f")
+	proc.HideWindow(cmd)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		// Ignore error if the value doesn't exist
 		if !strings.Contains(string(out), "unable to find") {

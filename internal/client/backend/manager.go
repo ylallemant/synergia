@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/ylallemant/synergia/internal/client/proc"
 	"github.com/ylallemant/synergia/internal/protocol"
 )
 
@@ -207,6 +208,7 @@ func (m *Manager) Verify() error {
 	}
 
 	cmd := exec.Command(m.binaryPath, "--version")
+	proc.HideWindow(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("backend binary verification failed: %w (output: %s)", err, string(output))
@@ -228,6 +230,7 @@ func (m *Manager) Start(port, modelPath string, p LlamaParams) error {
 	cmd := exec.Command(m.binaryPath, BuildArgs(port, modelPath, p)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	proc.HideWindow(cmd)
 	// Ensure the binary's own directory is in the dynamic-linker search path.
 	// Real llama.cpp release archives place shared libs alongside the binary
 	// (flat layout); Homebrew installs use @rpath/../lib. Including the binary

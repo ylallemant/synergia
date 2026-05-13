@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+
+	"github.com/ylallemant/synergia/internal/client/proc"
 )
 
 // selfReplace on Windows spawns the synergia-updater helper to perform the swap.
@@ -33,6 +35,7 @@ func selfReplace(execPath, newPath string) error {
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	proc.HideWindow(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start synergia-updater: %w", err)

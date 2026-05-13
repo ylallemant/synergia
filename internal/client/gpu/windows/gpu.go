@@ -5,7 +5,18 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/ylallemant/synergia/internal/client/proc"
 )
+
+// run wraps exec.Command + proc.HideWindow + .Output() — every spawn here
+// is short-lived and runs while the worker is active, so without the hide
+// flag a console window would flash on screen at every poll interval.
+func run(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	proc.HideWindow(cmd)
+	return cmd.Output()
+}
 
 // Prober reads GPU utilization on Windows.
 // Supports: NVIDIA (nvidia-smi), Intel/AMD/any WDDM 2.0+ GPU (typeperf), Moore Threads (mthreads-gmi).
@@ -54,7 +65,7 @@ func New() *Prober {
 // gpuCountersAvailable checks if Windows GPU performance counters exist.
 func gpuCountersAvailable() bool {
 	// Query if any GPU Engine counters exist (available on Windows 10 1709+ for all WDDM 2.0+ GPUs)
-	out, err := exec.Command("typeperf", "-qx", "GPU Engine").Output()
+	out, err := run("typeperf", "-qx", "GPU Engine")
 	if err != nil {
 		return false
 	}
@@ -96,7 +107,7 @@ func (p *Prober) Utilization() (int, error) {
 
 // nvidiaSMI queries GPU utilization via nvidia-smi.
 func nvidiaSMI() (int, error) {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits").Output()
+	out, err := run("nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits")
 	if err != nil {
 		return 0, err
 	}
@@ -117,7 +128,7 @@ func nvidiaSMI() (int, error) {
 
 // mthreadsGMI queries GPU utilization via mthreads-gmi (Moore Threads MUSA).
 func mthreadsGMI() (int, error) {
-	out, err := exec.Command("mthreads-gmi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits").Output()
+	out, err := run("mthreads-gmi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits")
 	if err != nil {
 		return 0, err
 	}
@@ -133,7 +144,7 @@ func mthreadsGMI() (int, error) {
 // Works for any WDDM 2.0+ GPU (Intel, AMD, NVIDIA) on Windows 10 1709+.
 func windowsGPUCounters() (int, error) {
 	// typeperf with -sc 1 takes a single sample
-	out, err := exec.Command("typeperf", `\GPU Engine(*engtype_3D)\Utilization Percentage`, "-sc", "1").Output()
+	out, err := run("typeperf", `\GPU Engine(*engtype_3D)\Utilization Percentage`, "-sc", "1")
 	if err != nil {
 		return 0, err
 	}
@@ -177,7 +188,7 @@ func (p *Prober) DriverInfo() (string, string) {
 func detectDriver(hasNvidia, hasMusa bool) (name, version string) {
 	// NVIDIA: nvidia-smi reports driver version directly
 	if hasNvidia {
-		if out, err := exec.Command("nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader,nounits").Output(); err == nil {
+		if out, err := run("nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader,nounits"); err == nil {
 			ver := strings.TrimSpace(string(out))
 			if ver != "" {
 				return "nvidia", strings.Split(ver, "\n")[0]
@@ -187,7 +198,7 @@ func detectDriver(hasNvidia, hasMusa bool) (name, version string) {
 
 	// Moore Threads: mthreads-gmi
 	if hasMusa {
-		if out, err := exec.Command("mthreads-gmi", "--query-gpu=driver_version", "--format=csv,noheader,nounits").Output(); err == nil {
+		if out, err := run("mthreads-gmi", "--query-gpu=driver_version", "--format=csv,noheader,nounits"); err == nil {
 			ver := strings.TrimSpace(string(out))
 			if ver != "" {
 				return "musa", ver
@@ -197,8 +208,8 @@ func detectDriver(hasNvidia, hasMusa bool) (name, version string) {
 	}
 
 	// Fallback: query WDDM driver via PowerShell (works for Intel, AMD, and any WDDM GPU)
-	if out, err := exec.Command("powershell", "-NoProfile", "-Command",
-		`Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty DriverVersion`).Output(); err == nil {
+	if out, err := run("powershell", "-NoProfile", "-Command",
+		`Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty DriverVersion`); err == nil {
 		ver := strings.TrimSpace(string(out))
 		if ver != "" {
 			// Determine vendor from adapter name
@@ -212,8 +223,8 @@ func detectDriver(hasNvidia, hasMusa bool) (name, version string) {
 
 // detectWDDMDriverName queries the Windows display adapter name to determine the GPU vendor.
 func detectWDDMDriverName() string {
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
-		`Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty Name`).Output()
+	out, err := run("powershell", "-NoProfile", "-Command",
+		`Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty Name`)
 	if err != nil {
 		return "wddm"
 	}

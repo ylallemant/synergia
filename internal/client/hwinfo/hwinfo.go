@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/ylallemant/synergia/internal/client/proc"
 )
 
 // Info holds the hardware statistics sent to the cluster manager.
@@ -105,7 +107,9 @@ elseif ($largest -gt 0)  { $vram = $largest }
   RAM   = [int64]$cs.TotalPhysicalMemory
 } | ConvertTo-Json -Compress
 `
-	out, err := exec.Command("powershell", "-NoProfile", "-Command", script).Output()
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", script)
+	proc.HideWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		// Fall back to per-field detection so we at least try.
 		info.OSVer = detectOSVersion()
@@ -299,7 +303,9 @@ func detectRAM() int {
 // psQuery runs a single PowerShell expression and returns its trimmed stdout.
 // Returns "" on failure. Used by Windows hwinfo detection.
 func psQuery(expr string) string {
-	out, err := exec.Command("powershell", "-NoProfile", "-Command", expr).Output()
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", expr)
+	proc.HideWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
