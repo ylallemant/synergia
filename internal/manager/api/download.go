@@ -402,7 +402,7 @@ func (d *DownloadAPI) loadBinary(filename, targetOS, targetArch, versionOverride
 	}
 
 	// 4. Fetch from GitHub and cache for future requests
-	url := buildDownloadURL(version, targetOS, targetArch)
+	url := buildDownloadURL(version, targetOS, targetArch, "client")
 	log.Info().Str("url", url).Str("filename", filename).Msg("fetching client binary from GitHub")
 
 	resp, err := http.Get(url)

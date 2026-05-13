@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -42,6 +43,18 @@ func (u *Updater) Apply(bu *protocol.BinaryUpdate) (bool, error) {
 		Str("target", bu.Version).
 		Msg("binary update received — starting download")
 
+	// On Windows, ensure the synergia-updater.exe sidecar is present before
+	// downloading the new binary — it is the only mechanism that can swap a
+	// locked executable. Fetched ahead of time so we fail fast (and don't waste
+	// the binary download) if the sidecar is unreachable. No-op on macOS/Linux.
+	execPath, err := os.Executable()
+	if err != nil {
+		return false, fmt.Errorf("failed to determine executable path: %w", err)
+	}
+	if err := u.ensureUpdater(filepath.Dir(execPath), bu.Version, runtime.GOARCH); err != nil {
+		return false, fmt.Errorf("ensure updater sidecar: %w", err)
+	}
+
 	// Download from the upstream URL (GitHub) first — it is faster and doesn't
 	// require the manager to be reachable. The manager URL is restored from the
 	// persisted state file on restart, so sentinel patching is no longer needed
@@ -68,12 +81,6 @@ func (u *Updater) Apply(bu *protocol.BinaryUpdate) (bool, error) {
 			return false, fmt.Errorf("SHA256 mismatch: expected %s, got %s", bu.SHA256, hash)
 		}
 		log.Info().Msg("SHA256 verified")
-	}
-
-	// Replace the running binary
-	execPath, err := os.Executable()
-	if err != nil {
-		return false, fmt.Errorf("failed to determine executable path: %w", err)
 	}
 
 	if err := selfReplace(execPath, tmpPath); err != nil {

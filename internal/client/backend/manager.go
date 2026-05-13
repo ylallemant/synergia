@@ -151,6 +151,19 @@ func (m *Manager) Apply(bu *protocol.BackendUpdate) (bool, error) {
 		binaryName = "llama-server.exe"
 	}
 
+	// Stop any running llama-server before overwriting the binary and its
+	// companion DLLs/shared libraries. On Windows this is required — the OS
+	// holds an exclusive lock on files mapped by the running process, so
+	// extraction would otherwise fail with "file in use" for ggml-base.dll
+	// and friends. On macOS/Linux this is defensive (overwrite works while a
+	// process holds the inode, but starting a new instance with mixed-version
+	// libraries is unsafe). The caller restarts llama-server after Apply
+	// succeeds.
+	if m.IsRunning() {
+		log.Info().Msg("stopping running llama-server before backend extraction")
+		m.Stop()
+	}
+
 	binaryPath, err := m.extractBinary(archivePath, bu.DownloadURL, binDir, binaryName)
 	if err != nil {
 		return false, fmt.Errorf("extract backend binary: %w", err)

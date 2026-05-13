@@ -154,13 +154,23 @@ func main() {
 		return
 	}
 
-	// Configure global HTTP transport with custom CA if provided
+	// Configure global HTTP transport with custom CA if provided. We must
+	// start from the system root pool — not an empty one — otherwise every
+	// outbound HTTPS request (model/binary downloads from GitHub, HuggingFace,
+	// etc.) loses trust in the OS-supplied roots and fails verification with
+	// "x509: certificate signed by unknown authority". The custom CA is
+	// appended ON TOP of the system roots so the client can still verify the
+	// manager's self-signed cert in test/dev environments.
 	if cfg.TLSCACert != "" {
 		caCert, err := os.ReadFile(cfg.TLSCACert)
 		if err != nil {
 			log.Fatal().Err(err).Str("path", cfg.TLSCACert).Msg("failed to read TLS CA certificate")
 		}
-		pool := x509.NewCertPool()
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			log.Warn().Err(err).Msg("system cert pool unavailable, starting from empty pool — GitHub HTTPS may fail")
+			pool = x509.NewCertPool()
+		}
 		if !pool.AppendCertsFromPEM(caCert) {
 			log.Fatal().Str("path", cfg.TLSCACert).Msg("failed to parse TLS CA certificate")
 		}

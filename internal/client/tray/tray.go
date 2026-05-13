@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"sync"
+	"sync/atomic"
 
 	"fyne.io/systray"
 	"github.com/rs/zerolog/log"
@@ -28,6 +30,15 @@ type Tray struct {
 	pauseCh  chan struct{}
 	resumeCh chan struct{}
 	quitCh   chan struct{}
+
+	// ready toggles to true once systray.Run has invoked onReady. Status
+	// updates that arrive before that race-condition window closes are
+	// buffered in pendingStatus (latest wins) and replayed by onReady.
+	// Without this, fyne.io/systray's SetIcon/SetTooltip return the
+	// noisy "tray not ready yet" warning twice on every Windows startup.
+	ready         atomic.Bool
+	pendingMu     sync.Mutex
+	pendingStatus string
 }
 
 func New(status StatusProvider, dashURL, adminURL string) *Tray {
@@ -64,6 +75,16 @@ func (t *Tray) Quit() {
 func (t *Tray) onReady() {
 	systray.SetTooltip("Synergia Worker")
 	t.setIcon(iconConnectedIdle)
+	t.ready.Store(true)
+
+	// Replay any status that arrived during the pre-ready race window.
+	t.pendingMu.Lock()
+	pending := t.pendingStatus
+	t.pendingStatus = ""
+	t.pendingMu.Unlock()
+	if pending != "" {
+		t.applyStatus(pending)
+	}
 
 	mDash := systray.AddMenuItem("Open Dashboard", "Open the worker dashboard in your browser")
 
@@ -117,8 +138,19 @@ func (t *Tray) onExit() {
 
 // UpdateStatus is a status.ChangeHandler — called by status.Provider.Run
 // whenever the computed status changes. It maps each status const to the
-// appropriate tray icon and tooltip.
+// appropriate tray icon and tooltip. If the systray hasn't finished
+// initialising yet, the latest status is buffered and replayed from onReady.
 func (t *Tray) UpdateStatus(_, current string) {
+	if !t.ready.Load() {
+		t.pendingMu.Lock()
+		t.pendingStatus = current
+		t.pendingMu.Unlock()
+		return
+	}
+	t.applyStatus(current)
+}
+
+func (t *Tray) applyStatus(current string) {
 	_, llmError := t.status.LLMReachable()
 	_, gpuReason := t.status.GPUSupported()
 

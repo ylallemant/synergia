@@ -5,9 +5,9 @@ The `test` package is a self-contained integration test binary. It compiles and 
 ## Prerequisites
 
 - Go toolchain
-- `llama-server` in `PATH` — install via `brew install llama.cpp` (macOS) or build from source
-- Internet access for first run — downloads ~100 MB of test models from HuggingFace and (in full mode) ~16 MB of llama.cpp releases from GitHub
 - `sqlite3` CLI — used internally to query the manager DB
+- Internet access for first run — downloads ~100 MB of test models from HuggingFace and (in full mode) ~16 MB of llama.cpp releases from GitHub
+- `llama-server` in `PATH` — **optional**. When present, the test packages it locally and serves it to the client over an in-process HTTP server (fast path, no GitHub download during bootstrap). When absent, the manager fetches the latest `llama.cpp` release from GitHub during `InitialSync` and the client downloads it from there — slower on first run but no system install required. Install via `brew install llama.cpp` (macOS) or build from source if you want the fast path.
 
 ## Modes
 
@@ -71,9 +71,9 @@ The test runs in two phases. **Phase 1** uses a single worker (embedding, port 7
 |---|---|
 | 0 | Generate self-signed TLS CA + server certificate used for the test manager |
 | 1 | Download two quantisations of SmolLM2-135M from HuggingFace (cached across runs in `test/testdata/models/`) |
-| 2 | Package the system `llama-server` binary (+ sibling `.dylib` / `.so` files) as a `tar.gz` and serve it from an in-process HTTP server |
+| 2 | If a system `llama-server` is in `PATH`, package it (+ sibling `.dylib` / `.so` files) as a `tar.gz` and serve it from an in-process HTTP server. Otherwise skip — the manager will fetch the latest `llama.cpp` release from GitHub during `InitialSync` |
 | 3 | *(informational)* — llama-server will be started by the client after binary/model push |
-| 4 | Start `synergia-manager` with `--development`, TLS, bearer auth, and the local binary distribution URL |
+| 4 | Start `synergia-manager` with `--development`, TLS, bearer auth, and (when step 2 packaged a local binary) the local binary distribution URL |
 | 5 | Verify the model listing endpoint returns the expected test model |
 | 6 | Start embedding client (port 7502) with a clean data directory (no cached binary, no cached model) |
 | 7 | Verify the client registers with the manager via key-auth (Bearer token) |

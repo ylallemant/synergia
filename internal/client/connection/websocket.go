@@ -56,7 +56,14 @@ func New(url, workerKey string, id *identity.Identity, model, quantisation, tlsC
 		if err != nil {
 			log.Fatal().Err(err).Str("path", tlsCACert).Msg("failed to read TLS CA certificate")
 		}
-		pool := x509.NewCertPool()
+		// Start from the system root pool so a corporate/test CA can be added
+		// on top without losing trust in publicly-issued certs (matches the
+		// HTTP transport configuration in cmd/synergia-client/main.go).
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			log.Warn().Err(err).Msg("system cert pool unavailable, starting from empty pool")
+			pool = x509.NewCertPool()
+		}
 		if !pool.AppendCertsFromPEM(caCert) {
 			log.Fatal().Str("path", tlsCACert).Msg("failed to parse TLS CA certificate")
 		}

@@ -21,3 +21,4 @@
 |---|---|
 | [Security assessment](security.md) | Attack surface analysis, threat model, prioritised testing checklist |
 | [Apple Developer ID](apple-developer-id.md) | Code signing and notarization for macOS client distribution |
+| [Windows TODOs](windows-todos.md) | Deferred Windows-specific items (binary self-update, autostart, CGO build, code signing) |

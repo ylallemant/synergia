@@ -135,6 +135,51 @@ func (lb *logBuffer) CountContains(substr string) int {
 	return count
 }
 
+// Mark returns the current line count — pass it as offset to ContainsAfter /
+// CountContainsAfter / waitForLogAfter to scope subsequent matches to lines
+// produced AFTER this call. Prevents false positives where a wait matches a
+// historical entry produced by an earlier test step.
+func (lb *logBuffer) Mark() int {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return len(lb.lines)
+}
+
+func (lb *logBuffer) ContainsAfter(substr string, offset int) bool {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(lb.lines) {
+		offset = len(lb.lines)
+	}
+	for _, line := range lb.lines[offset:] {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (lb *logBuffer) CountContainsAfter(substr string, offset int) int {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(lb.lines) {
+		offset = len(lb.lines)
+	}
+	count := 0
+	for _, line := range lb.lines[offset:] {
+		if strings.Contains(line, substr) {
+			count++
+		}
+	}
+	return count
+}
+
 func (lb *logBuffer) Dump(w io.Writer) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
@@ -222,6 +267,15 @@ func main() {
 	// Clean up old runs (keep last 3)
 	cleanupOldRuns(filepath.Join(testDir, "runs"), 3)
 
+	// Pre-build the test binaries. This replaces the previous `go run` flow,
+	// which inserted a go.exe parent between the test process and the actual
+	// synergia binaries — making Windows Job Object cleanup unreliable (the
+	// grandchildren weren't part of the job because go.exe spawned them
+	// before we could assign it). With direct binaries the test owns a flat
+	// process tree and Job Object cleanup is race-free. As a side benefit
+	// each run is also faster (no per-launch recompile).
+	managerBin, clientBin := buildTestBinaries(repoRoot, filepath.Join(testDir, "bin"))
+
 	// --- Step 0: Generate TLS certificates ---
 	step("0. Generating TLS certificates")
 	tlsDir := filepath.Join(testDir, "testdata", "tls")
@@ -281,34 +335,37 @@ func main() {
 
 	// --- Step 2: Package llama-server binary for manager distribution ---
 	// The client downloads and starts its own llama-server (production behaviour).
-	// We package the system binary and serve it via a local HTTP server so the
-	// manager can push a BackendUpdate without a GitHub download.
+	// If a system llama-server is available we package it and serve it via a local
+	// HTTP server (fast path — no GitHub download). When it's not present, we
+	// leave the backend URL unset so the manager fetches the latest llama.cpp
+	// release from GitHub during InitialSync.
 	step("2. Packaging llama-server binary for manager distribution")
+	var binaryServerURL string
 	llamaServerBin, err := exec.LookPath("llama-server")
 	if err != nil {
-		fatal("llama-server not found in PATH. Install llama.cpp first: brew install llama.cpp")
+		log.Info().Msg("  ⓘ llama-server not in PATH — manager will fetch latest llama.cpp from GitHub")
+	} else {
+		pass("llama-server found: %s", llamaServerBin)
+		tarGzData, err := packageBinaryWithLibs(llamaServerBin)
+		if err != nil {
+			fatal("package llama-server binary: %v", err)
+		}
+		binaryLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			fatal("binary distribution server: %v", err)
+		}
+		binaryServerURL = "http://" + binaryLn.Addr().String() + "/llama-server.tar.gz"
+		binaryMux := http.NewServeMux()
+		binaryMux.HandleFunc("/llama-server.tar.gz", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/gzip")
+			w.Header().Set("Content-Length", strconv.Itoa(len(tarGzData)))
+			w.Write(tarGzData) //nolint:errcheck
+		})
+		binarySrv := &http.Server{Handler: binaryMux}
+		go binarySrv.Serve(binaryLn) //nolint:errcheck
+		defer binarySrv.Close()
+		pass("binary distribution server ready: %s", binaryServerURL)
 	}
-	pass("llama-server found: %s", llamaServerBin)
-
-	tarGzData, err := packageBinaryWithLibs(llamaServerBin)
-	if err != nil {
-		fatal("package llama-server binary: %v", err)
-	}
-	binaryLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		fatal("binary distribution server: %v", err)
-	}
-	binaryServerURL := "http://" + binaryLn.Addr().String() + "/llama-server.tar.gz"
-	binaryMux := http.NewServeMux()
-	binaryMux.HandleFunc("/llama-server.tar.gz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/gzip")
-		w.Header().Set("Content-Length", strconv.Itoa(len(tarGzData)))
-		w.Write(tarGzData) //nolint:errcheck
-	})
-	binarySrv := &http.Server{Handler: binaryMux}
-	go binarySrv.Serve(binaryLn) //nolint:errcheck
-	defer binarySrv.Close()
-	pass("binary distribution server ready: %s", binaryServerURL)
 
 	// --- Step 3: (client manages its own llama-server — no external process) ---
 	step("3. llama-server will be started by the client after binary/model push")
@@ -317,16 +374,15 @@ func main() {
 	step("4. Starting cluster-manager")
 	managerLogs := newLogBuffer("cluster-manager", logDir)
 	defer managerLogs.Close()
-	managerCmd := exec.Command("go", "run", "./cmd/synergia-manager", "--development")
+	managerCmd := exec.Command(managerBin, "--development")
 	managerCmd.Dir = repoRoot
-	managerCmd.Env = append(os.Environ(),
+	managerEnv := append(os.Environ(),
 		"CLUSTER_LISTEN_ADDR="+managerAddr,
 		"CLUSTER_API_KEY="+apiKey,
 		"CLUSTER_WORKER_KEY="+workerKey,
 		"CLUSTER_MODEL_BACKEND=filesystem",
 		"CLUSTER_MODEL_PATH="+modelsDir,
 		"CLUSTER_DB_PATH="+filepath.Join(dataDir, "cluster-manager.db"),
-		"CLUSTER_DEV_BACKEND_URL="+binaryServerURL,
 		"CLUSTER_DEV_CLIENT_VERSION=0.1.0-dev",
 		"CLUSTER_ADMIN_ADDR="+managerAdminAddr,
 		"CLUSTER_ADMIN_USER="+adminUser,
@@ -336,8 +392,13 @@ func main() {
 		"CLUSTER_HTTP_REDIRECT_ADDR="+managerRedirectAddr,
 		"LOG_LEVEL=debug",
 	)
+	if binaryServerURL != "" {
+		managerEnv = append(managerEnv, "CLUSTER_DEV_BACKEND_URL="+binaryServerURL)
+	}
+	managerCmd.Env = managerEnv
 	managerCmd.Stdout = managerLogs
 	managerCmd.Stderr = managerLogs
+	prepareGroup(managerCmd)
 	if err := managerCmd.Start(); err != nil {
 		fatal("start cluster-manager: %v", err)
 	}
@@ -403,7 +464,7 @@ func main() {
 	startClient := func(cs clientSpec) (*logBuffer, *exec.Cmd) {
 		dashPort := strings.Split(cs.dashAddr, ":")[1]
 		logs := newLogBuffer(cs.name, logDir)
-		cmd := exec.Command("go", "run", "./cmd/synergia-client",
+		cmd := exec.Command(clientBin,
 			"--manager-url", "wss://"+managerAddr+"/ws/worker",
 			"--llm-url", "http://"+cs.llamaAddr,
 			"--dashboard-addr", cs.dashAddr,
@@ -423,6 +484,7 @@ func main() {
 		)
 		cmd.Stdout = logs
 		cmd.Stderr = logs
+		prepareGroup(cmd)
 		if err := cmd.Start(); err != nil {
 			fatal("start %s: %v", cs.name, err)
 		}
@@ -486,7 +548,7 @@ func main() {
 
 		tofuManagerLogs := newLogBuffer("tofu-manager", logDir)
 		defer tofuManagerLogs.Close()
-		tofuManagerCmd := exec.Command("go", "run", "./cmd/synergia-manager")
+		tofuManagerCmd := exec.Command(managerBin)
 		tofuManagerCmd.Dir = repoRoot
 		tofuManagerCmd.Env = append(os.Environ(),
 			"CLUSTER_LISTEN_ADDR="+tofuManagerAddr,
@@ -504,6 +566,7 @@ func main() {
 		)
 		tofuManagerCmd.Stdout = tofuManagerLogs
 		tofuManagerCmd.Stderr = tofuManagerLogs
+		prepareGroup(tofuManagerCmd)
 		if err := tofuManagerCmd.Start(); err != nil {
 			fatal("start tofu-manager: %v", err)
 		}
@@ -519,7 +582,7 @@ func main() {
 		tofuClientDataDir := filepath.Join(dataDir, "tofu-client-data")
 		tofuClientLogs := newLogBuffer("tofu-client", logDir)
 		defer tofuClientLogs.Close()
-		tofuClientCmd := exec.Command("go", "run", "./cmd/synergia-client",
+		tofuClientCmd := exec.Command(clientBin,
 			"--manager-url", "wss://"+tofuManagerAddr+"/ws/worker",
 			"--dashboard-addr", "127.0.0.1:7504", // auth-only test; unique port avoids conflict
 			"--model", testModelName,
@@ -535,21 +598,25 @@ func main() {
 		tofuClientCmd.Env = append(os.Environ(), "LOG_LEVEL=debug")
 		tofuClientCmd.Stdout = tofuClientLogs
 		tofuClientCmd.Stderr = tofuClientLogs
+		prepareGroup(tofuClientCmd)
 		if err := tofuClientCmd.Start(); err != nil {
 			fatal("start tofu-client: %v", err)
 		}
 		defer cleanup("tofu-client", tofuClientCmd)
 		watcher.add("tofu-client", tofuClientCmd, tofuClientLogs)
 
-		// Client should log TOFU mode selection
-		if err := waitForLog(tofuClientLogs, "TOFU mode — awaiting challenge", 15*time.Second); err != nil {
+		// Client should log TOFU mode selection. The wait is generous because
+		// client startup includes GPU baseline calibration (5 samples × ~1 s)
+		// plus a Windows-only hwinfo PowerShell call (~1.5 s), so first-contact
+		// can take ~10-15 s before the WebSocket connection is even attempted.
+		if err := waitForLog(tofuClientLogs, "TOFU mode — awaiting challenge", 45*time.Second); err != nil {
 			tofuClientLogs.Dump(os.Stderr)
 			fatal("tofu-client did not log TOFU mode selection: %v", err)
 		}
 		pass("Client: TOFU mode selected (no worker key)")
 
 		// Manager should log challenge sent
-		if err := waitForLog(tofuManagerLogs, "handshake: TOFU mode — sending challenge", 15*time.Second); err != nil {
+		if err := waitForLog(tofuManagerLogs, "handshake: TOFU mode — sending challenge", 30*time.Second); err != nil {
 			tofuManagerLogs.Dump(os.Stderr)
 			fatal("tofu-manager did not send challenge: %v", err)
 		}
@@ -655,6 +722,10 @@ func main() {
 		fatal("no completed work units in stats: %s", statsResp)
 	}
 	pass("Stats show completed work: %s", statsResp)
+
+	// --- Step 11b: Verify worker hardware info collection ---
+	step("11b. Verifying client hardware info collection")
+	verifyHardwareInfo("http://" + clientDashboardAddr)
 
 	// --- Step 12: LLM Hash and Model Update flow (file-hash-based) --- skipped with --keep-alive ---
 	if !keepAlive {
@@ -1169,6 +1240,18 @@ func main() {
 			pass("Client received binary_update push")
 		}
 
+		// Windows-only: on receipt of a binary update, the client must auto-fetch
+		// the synergia-updater.exe sidecar (since the running .exe is locked and
+		// can only be replaced by an external helper). The fake test version
+		// won't actually download successfully, but we verify the attempt was
+		// made — that is sufficient to prove the code path is wired up.
+		if runtime.GOOS == "windows" {
+			if err := waitForLog(clientLogs, "synergia-updater.exe missing — downloading sidecar", 10*time.Second); err != nil {
+				fatal("client did not attempt sidecar auto-download on binary update: %v", err)
+			}
+			pass("Client attempted synergia-updater.exe auto-download on binary update")
+		}
+
 		// Verify worker has OS/Arch in DB
 		workerOSCount := querySQLiteCount(dbPath, "SELECT COUNT(*) FROM workers WHERE os != '' AND arch != ''")
 		if workerOSCount > 0 {
@@ -1184,6 +1267,12 @@ func main() {
 		step("21. Testing backend admin API with real llama.cpp release")
 		{
 			// Use the real llama.cpp release URL template
+			// Snapshot the log offset BEFORE the POST so the subsequent waits
+			// only match log entries produced in response to this request
+			// (avoids matching the historical "backend binary updated
+			// successfully" entry from InitialSync's b9128 install).
+			b9049Offset := clientLogs.Mark()
+
 			// First: set backend version b9049 (triggers real download)
 			backendPayload1 := `{"name":"llama.cpp","version":"b9049","sha256":""}`
 			backendReq1, _ := http.NewRequest(http.MethodPost, "https://"+managerAdminAddr+"/v1/admin/backend", bytes.NewBufferString(backendPayload1))
@@ -1200,17 +1289,17 @@ func main() {
 			pass("POST /v1/admin/backend → b9049")
 
 			// Wait for the client to process the backend update
-			if err := waitForLog(clientLogs, "backend binary updated successfully", 120*time.Second); err != nil {
+			if err := waitForLogAfter(clientLogs, "backend binary updated successfully", b9049Offset, 120*time.Second); err != nil {
 				// Check if it was received at all
-				if err2 := waitForLog(clientLogs, "backend update", 5*time.Second); err2 != nil {
+				if err2 := waitForLogAfter(clientLogs, "backend update", b9049Offset, 5*time.Second); err2 != nil {
 					fatal("backend_update not received by client: %v", err)
 				}
 				fatal("backend download/install failed (check client logs): %v", err)
 			}
 			pass("Client downloaded and installed llama-server b9049")
 
-			// Wait for the client to restart llama-server with the new binary (2nd start overall).
-			if err := waitForLogN(clientLogs, "backend: llama-server process started", 2, 120*time.Second); err != nil {
+			// Wait for the client to (re)start llama-server with the new binary.
+			if err := waitForLogAfter(clientLogs, "backend: llama-server process started", b9049Offset, 120*time.Second); err != nil {
 				fatal("llama-server did not restart after b9049 upgrade: %v", err)
 			}
 			if err := waitForHTTP("http://"+clientLlamaAddr+"/health", 120*time.Second); err != nil {
@@ -1254,6 +1343,10 @@ func main() {
 			pass("GET /v1/admin/backend → version=b9049")
 
 			// Second: upgrade to b9050 (triggers real update)
+			// Same offset-snapshot trick — only count entries produced from
+			// this POST onward.
+			b9050Offset := clientLogs.Mark()
+
 			backendPayload2 := `{"name":"llama.cpp","version":"b9050","sha256":""}`
 			backendReq2, _ := http.NewRequest(http.MethodPost, "https://"+managerAdminAddr+"/v1/admin/backend", bytes.NewBufferString(backendPayload2))
 			backendReq2.Header.Set("Authorization", "Bearer "+apiKey)
@@ -1269,13 +1362,13 @@ func main() {
 			pass("POST /v1/admin/backend → b9050 (upgrade)")
 
 			// Wait for the client to process the update
-			if err := waitForLogN(clientLogs, "backend binary updated successfully", 2, 120*time.Second); err != nil {
+			if err := waitForLogAfter(clientLogs, "backend binary updated successfully", b9050Offset, 120*time.Second); err != nil {
 				fatal("backend upgrade to b9050 failed: %v", err)
 			}
 			pass("Client upgraded backend to b9050")
 
-			// Wait for llama-server to restart with b9050 (3rd start overall).
-			if err := waitForLogN(clientLogs, "backend: llama-server process started", 3, 120*time.Second); err != nil {
+			// Wait for llama-server to restart with b9050.
+			if err := waitForLogAfter(clientLogs, "backend: llama-server process started", b9050Offset, 120*time.Second); err != nil {
 				fatal("llama-server did not restart after b9050 upgrade: %v", err)
 			}
 			if err := waitForHTTP("http://"+clientLlamaAddr+"/health", 120*time.Second); err != nil {
@@ -1287,18 +1380,25 @@ func main() {
 
 	// --- Step 21b: Phase 2 — start additional workers and verify multi-worker dispatch ---
 	step("21b. Starting additional workers (inference, tester) for multi-worker validation")
+	// Snapshot the manager log offset BEFORE launching the new workers so the
+	// "worker connected" wait below counts only NEW connections — without this
+	// the wait matched cluster-client-7502's historical entry from step 7 and
+	// returned instantly, letting the test exit while the new clients were
+	// still in startup (no signal handler installed yet → graceful tray
+	// cleanup at end-of-test couldn't run → ghost icons in the Windows
+	// notification area).
+	phase2ManagerOffset := managerLogs.Mark()
 	for _, cs := range clientSpecs[1:] {
 		logs, cmd := startClient(cs)
 		defer logs.Close()
 		defer cleanup(cs.name, cmd)
 		allClientLogs = append(allClientLogs, logs)
 	}
-	// Wait for all additional workers to connect and become available.
-	for i := 1; i <= len(clientSpecs)-1; i++ {
-		if err := waitForLog(managerLogs, "worker connected", 30*time.Second); err != nil {
-			managerLogs.Dump(os.Stderr)
-			fatal("additional worker %d did not connect: %v", i+1, err)
-		}
+	// Wait for each new worker to connect (one fresh log entry per worker).
+	additionalWorkers := len(clientSpecs) - 1
+	if err := waitForLogAfterN(managerLogs, "worker connected", additionalWorkers, phase2ManagerOffset, 60*time.Second); err != nil {
+		managerLogs.Dump(os.Stderr)
+		fatal("not all additional workers connected: %v", err)
 	}
 	pass("All %d workers connected to manager", len(clientSpecs))
 
@@ -1326,6 +1426,14 @@ func main() {
 	log.Info().Msg("")
 	log.Info().Msg("=== ALL TESTS PASSED ===")
 	log.Info().Str("dir", runDir).Msg("output")
+
+	// Mark the watcher as stopping so the cleanup defers about to run don't
+	// race with the per-process watcher goroutines and trigger a spurious
+	// "process exited unexpectedly — aborting test" after the test has
+	// already passed. (The watcher only suppresses these errors when
+	// pw.stopping is true; without this signal the natural end-of-main
+	// teardown looks identical to an actual crash from its perspective.)
+	watcher.stopping.Store(true)
 
 	if keepAlive {
 		log.Info().Msg("")
@@ -1625,6 +1733,121 @@ func waitForLogN(lb *logBuffer, substr string, n int, timeout time.Duration) err
 	return fmt.Errorf("timeout waiting for %d occurrences of %q (got %d)", n, substr, lb.CountContains(substr))
 }
 
+// waitForLogAfter waits for substr to appear after the given log offset.
+// Use lb.Mark() before triggering an action, then pass that offset here to
+// avoid matching historical entries from earlier test steps.
+func waitForLogAfter(lb *logBuffer, substr string, offset int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if lb.ContainsAfter(substr, offset) {
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for log containing %q after offset %d", substr, offset)
+}
+
+// waitForLogAfterN waits for substr to appear at least n times after offset.
+func waitForLogAfterN(lb *logBuffer, substr string, n, offset int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if lb.CountContainsAfter(substr, offset) >= n {
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for %d occurrences of %q after offset %d (got %d)",
+		n, substr, offset, lb.CountContainsAfter(substr, offset))
+}
+
+// verifyHardwareInfo fetches the client's /api/hardware-info payload and
+// asserts that every field hwinfo.Collect() is expected to populate has been
+// filled. Fields are split into two tiers:
+//
+//   - mandatory:  os, os_version, cpu (real CPU model — not just GOOS/GOARCH),
+//                 cpu_cores, ram_mb — these must work on any supported OS.
+//                 Failing any of these fatals the test.
+//
+//   - best-effort: gpu (model), vram_mb, gpu_driver, gpu_driver_version —
+//                 dependent on hardware/driver availability (e.g. lspci, NVML,
+//                 WDDM-visible GPU). Logged as warnings when absent so the
+//                 test still passes on hardware without a discoverable GPU.
+func verifyHardwareInfo(dashboardURL string) {
+	resp, err := http.Get(dashboardURL + "/api/hardware-info")
+	if err != nil {
+		fatal("hardware-info GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fatal("hardware-info returned status %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Hardware struct {
+			OS               string `json:"os"`
+			OSVersion        string `json:"os_version"`
+			GPU              string `json:"gpu"`
+			GPUDriver        string `json:"gpu_driver"`
+			GPUDriverVersion string `json:"gpu_driver_version"`
+			VRAMMB           int    `json:"vram_mb"`
+			CPU              string `json:"cpu"`
+			CPUCores         int    `json:"cpu_cores"`
+			RAMMB            int    `json:"ram_mb"`
+		} `json:"hardware"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		fatal("hardware-info JSON decode: %v", err)
+	}
+	hw := body.Hardware
+
+	// Mandatory: must be populated on every supported OS.
+	if hw.OS == "" {
+		fatal("hardware.os is empty")
+	}
+	if hw.OSVersion == "" || hw.OSVersion == "unknown" {
+		fatal("hardware.os_version not detected (got %q)", hw.OSVersion)
+	}
+	fallbackCPU := fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
+	if hw.CPU == "" || hw.CPU == fallbackCPU {
+		fatal("hardware.cpu not detected (got %q — fallback string, real CPU model expected)", hw.CPU)
+	}
+	if hw.CPUCores <= 0 {
+		fatal("hardware.cpu_cores is %d (expected > 0)", hw.CPUCores)
+	}
+	if hw.RAMMB <= 0 {
+		fatal("hardware.ram_mb is %d (expected > 0)", hw.RAMMB)
+	}
+	pass("Mandatory hardware fields populated: os=%s os_version=%s cpu=%q cpu_cores=%d ram_mb=%d",
+		hw.OS, hw.OSVersion, hw.CPU, hw.CPUCores, hw.RAMMB)
+
+	// Best-effort: depend on hardware. Warn on absence so the test still
+	// passes on machines without a discoverable discrete GPU.
+	switch {
+	case hw.GPU == "" || hw.GPU == "unknown":
+		log.Warn().Msg("hardware.gpu not detected (best-effort)")
+	default:
+		pass("hardware.gpu detected: %q", hw.GPU)
+	}
+	switch {
+	case hw.VRAMMB <= 0:
+		log.Warn().Msg("hardware.vram_mb is 0 (best-effort)")
+	default:
+		pass("hardware.vram_mb detected: %d MB", hw.VRAMMB)
+	}
+	switch {
+	case hw.GPUDriver == "":
+		log.Warn().Msg("hardware.gpu_driver not detected (best-effort)")
+	default:
+		pass("hardware.gpu_driver detected: %s", hw.GPUDriver)
+	}
+	switch {
+	case hw.GPUDriverVersion == "":
+		log.Warn().Msg("hardware.gpu_driver_version not detected (best-effort)")
+	default:
+		pass("hardware.gpu_driver_version detected: %s", hw.GPUDriverVersion)
+	}
+}
+
 func apiGet(url, key string) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -1918,6 +2141,13 @@ type watchedProc struct {
 var watcher = &processWatcher{}
 
 func (pw *processWatcher) add(name string, cmd *exec.Cmd, logs *logBuffer) {
+	// On Windows, attach the child to the kill-on-exit Job Object so the
+	// OS terminates every descendant (including go.exe's grandchildren —
+	// synergia-manager.exe, synergia-client.exe, llama-server.exe) when
+	// the test process exits, even on fatal() / panic / Ctrl-C. No-op on
+	// Unix where signal propagation handles it.
+	registerForCleanup(cmd)
+
 	pw.mu.Lock()
 	pw.procs = append(pw.procs, watchedProc{name, cmd, logs})
 	pw.mu.Unlock()
@@ -1964,20 +2194,16 @@ func waitForLogAny(bufs []*logBuffer, substr string, timeout time.Duration) erro
 }
 
 func cleanup(name string, cmd *exec.Cmd) {
-	if cmd.Process != nil {
-		log.Info().Str("process", name).Msg("stopping")
-		cmd.Process.Signal(os.Interrupt)
-		done := make(chan struct{})
-		go func() {
-			cmd.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			cmd.Process.Kill()
-		}
+	if cmd == nil || cmd.Process == nil {
+		return
 	}
+	log.Info().Str("process", name).Msg("stopping")
+	// Platform-specific graceful-stop-then-kill. On Windows this is the
+	// path that triggers fyne.io/systray's NIM_DELETE — without it the
+	// shell holds stale tray icons in its cache after the test exits
+	// (visible as "ghost" icons until the user hovers the notification
+	// area). See test/processgroup_{windows,other}.go.
+	gracefulOrKill(cmd)
 }
 
 func writeOutput(path string, data []byte) {
@@ -1991,6 +2217,39 @@ func step(msg string) {
 	log.Info().Msg(msg)
 }
 
+// buildTestBinaries compiles synergia-manager and synergia-client into binDir
+// and returns the resolved paths. Replaces the old `go run` invocations so the
+// test owns a flat process tree (no intermediate go.exe parent), which is
+// required for the Windows Job Object cleanup to terminate every descendant
+// when the test process exits.
+func buildTestBinaries(repoRoot, binDir string) (managerBin, clientBin string) {
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		fatal("create test bin dir: %v", err)
+	}
+	exeExt := ""
+	if runtime.GOOS == "windows" {
+		exeExt = ".exe"
+	}
+	managerBin = filepath.Join(binDir, "synergia-manager"+exeExt)
+	clientBin = filepath.Join(binDir, "synergia-client"+exeExt)
+
+	log.Info().Msg("Building test binaries…")
+	for _, b := range []struct{ out, pkg string }{
+		{managerBin, "./cmd/synergia-manager"},
+		{clientBin, "./cmd/synergia-client"},
+	} {
+		cmd := exec.Command("go", "build", "-o", b.out, b.pkg)
+		cmd.Dir = repoRoot
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fatal("build %s: %v", b.pkg, err)
+		}
+	}
+	pass("Built test binaries: %s, %s", filepath.Base(managerBin), filepath.Base(clientBin))
+	return managerBin, clientBin
+}
+
 func pass(format string, args ...any) {
 	log.Info().Msgf("  ✓ "+format, args...)
 }
@@ -2002,7 +2261,10 @@ func fatal(format string, args ...any) {
 }
 
 // freePort ensures addr ("host:port") is available, killing any stale process
-// that holds it. Tries SIGTERM first, then SIGKILL after 3 s, then fatal.
+// that holds it. On Unix, tries SIGTERM first then SIGKILL after 3 s. On
+// Windows, SIGTERM isn't deliverable so the graceful step is skipped and
+// the process is killed (TerminateProcess) directly. PID enumeration is
+// platform-specific — see freeport_{windows,other}.go.
 func freePort(addr string) {
 	if ln, err := net.Listen("tcp", addr); err == nil {
 		ln.Close()
@@ -2012,52 +2274,42 @@ func freePort(addr string) {
 	_, portStr, _ := net.SplitHostPort(addr)
 	log.Warn().Str("addr", addr).Msg("port in use — killing stale process")
 
-	// Find and signal all PIDs holding the port.
-	out, err := exec.Command("lsof", "-ti", ":"+portStr).Output()
-	if err == nil {
-		for pidStr := range strings.FieldsSeq(string(out)) {
-			pid, err := strconv.Atoi(strings.TrimSpace(pidStr))
-			if err != nil {
-				continue
-			}
+	// Step 1 (Unix only): graceful SIGTERM, give 3 s to clean up.
+	if runtime.GOOS != "windows" {
+		for _, pid := range findPIDsHoldingPort(portStr) {
 			p, err := os.FindProcess(pid)
 			if err != nil {
 				continue
 			}
 			log.Warn().Int("pid", pid).Str("addr", addr).Msg("sending SIGTERM to stale process")
-			p.Signal(syscall.SIGTERM)
+			_ = p.Signal(syscall.SIGTERM)
 		}
-	}
-
-	// Wait up to 3 s for SIGTERM to take effect.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
-		if ln, err := net.Listen("tcp", addr); err == nil {
-			ln.Close()
-			log.Info().Str("addr", addr).Msg("port now free")
-			return
-		}
-	}
-
-	// SIGTERM wasn't enough — escalate to SIGKILL.
-	if out, err := exec.Command("lsof", "-ti", ":"+portStr).Output(); err == nil {
-		for pidStr := range strings.FieldsSeq(string(out)) {
-			pid, _ := strconv.Atoi(strings.TrimSpace(pidStr))
-			if p, err := os.FindProcess(pid); err == nil {
-				log.Warn().Int("pid", pid).Str("addr", addr).Msg("sending SIGKILL to stale process")
-				p.Kill()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(200 * time.Millisecond)
+			if ln, err := net.Listen("tcp", addr); err == nil {
+				ln.Close()
+				log.Info().Str("addr", addr).Msg("port now free")
+				return
 			}
+		}
+	}
+
+	// Step 2: force-kill anyone still holding the port (TerminateProcess on Windows, SIGKILL on Unix).
+	for _, pid := range findPIDsHoldingPort(portStr) {
+		if p, err := os.FindProcess(pid); err == nil {
+			log.Warn().Int("pid", pid).Str("addr", addr).Msg("force-killing stale process")
+			_ = p.Kill()
 		}
 	}
 	time.Sleep(500 * time.Millisecond)
 	if ln, err := net.Listen("tcp", addr); err == nil {
 		ln.Close()
-		log.Info().Str("addr", addr).Msg("port now free after SIGKILL")
+		log.Info().Str("addr", addr).Msg("port now free after kill")
 		return
 	}
 
-	fatal("port %s is still in use after SIGKILL — give up", addr)
+	fatal("port %s is still in use after kill — give up", addr)
 }
 
 // querySQLiteCount runs a SQL query that returns a single integer count via the sqlite3 CLI.
@@ -2290,6 +2542,10 @@ func runServices() {
 
 	cleanupOldRuns(filepath.Join(testDir, "runs"), 3)
 
+	// Pre-build the synergia binaries so the test owns a flat process tree —
+	// required for reliable Windows Job Object cleanup. See buildTestBinaries.
+	managerBin, clientBin := buildTestBinaries(repoRoot, filepath.Join(testDir, "bin"))
+
 	// Pre-flight: kill any stale processes holding required ports.
 	for _, addr := range []string{
 		managerAddr, managerAdminAddr, managerRedirectAddr,
@@ -2329,49 +2585,51 @@ func runServices() {
 		fatal("model download: %v", err)
 	}
 
-	// Find the system llama-server binary and package it as a tar.gz so the
-	// manager can distribute it to the client — matching the production flow.
+	// If a system llama-server is present we package it as a tar.gz so the
+	// manager can distribute it locally (fast path — no GitHub download).
+	// Otherwise the manager fetches the latest llama.cpp release from GitHub.
+	var binaryServerURL string
 	llamaServerBin, err := exec.LookPath("llama-server")
 	if err != nil {
-		fatal("llama-server not found in PATH — install llama.cpp first: brew install llama.cpp")
-	}
-	log.Info().Str("path", llamaServerBin).Msg("packaging llama-server binary for distribution")
+		log.Info().Msg("llama-server not in PATH — manager will fetch latest llama.cpp from GitHub")
+	} else {
+		log.Info().Str("path", llamaServerBin).Msg("packaging llama-server binary for distribution")
 
-	tarGzData, err := packageBinaryWithLibs(llamaServerBin)
-	if err != nil {
-		fatal("package llama-server binary: %v", err)
-	}
+		tarGzData, err := packageBinaryWithLibs(llamaServerBin)
+		if err != nil {
+			fatal("package llama-server binary: %v", err)
+		}
 
-	// Serve the tar.gz from an in-process HTTP server on an ephemeral port.
-	binaryLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		fatal("binary distribution server: %v", err)
+		// Serve the tar.gz from an in-process HTTP server on an ephemeral port.
+		binaryLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			fatal("binary distribution server: %v", err)
+		}
+		binaryServerURL = "http://" + binaryLn.Addr().String() + "/llama-server.tar.gz"
+		binaryMux := http.NewServeMux()
+		binaryMux.HandleFunc("/llama-server.tar.gz", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/gzip")
+			w.Header().Set("Content-Length", strconv.Itoa(len(tarGzData)))
+			w.Write(tarGzData) //nolint:errcheck
+		})
+		binarySrv := &http.Server{Handler: binaryMux}
+		go binarySrv.Serve(binaryLn) //nolint:errcheck
+		defer binarySrv.Close()
+		log.Info().Str("url", binaryServerURL).Msg("binary distribution server ready")
 	}
-	binaryServerURL := "http://" + binaryLn.Addr().String() + "/llama-server.tar.gz"
-	binaryMux := http.NewServeMux()
-	binaryMux.HandleFunc("/llama-server.tar.gz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/gzip")
-		w.Header().Set("Content-Length", strconv.Itoa(len(tarGzData)))
-		w.Write(tarGzData) //nolint:errcheck
-	})
-	binarySrv := &http.Server{Handler: binaryMux}
-	go binarySrv.Serve(binaryLn) //nolint:errcheck
-	defer binarySrv.Close()
-	log.Info().Str("url", binaryServerURL).Msg("binary distribution server ready")
 
 	// --- Start cluster-manager ---
 	managerLogs := newLogBuffer("cluster-manager", logDir)
 	defer managerLogs.Close()
-	managerCmd := exec.Command("go", "run", "./cmd/synergia-manager", "--development")
+	managerCmd := exec.Command(managerBin, "--development")
 	managerCmd.Dir = repoRoot
-	managerCmd.Env = append(os.Environ(),
+	managerEnv := append(os.Environ(),
 		"CLUSTER_LISTEN_ADDR="+managerAddr,
 		"CLUSTER_API_KEY="+apiKey,
 		"CLUSTER_WORKER_KEY="+workerKey,
 		"CLUSTER_MODEL_BACKEND=filesystem",
 		"CLUSTER_MODEL_PATH="+modelsDir,
 		"CLUSTER_DB_PATH="+filepath.Join(dataDir, "cluster-manager.db"),
-		"CLUSTER_DEV_BACKEND_URL="+binaryServerURL,
 		"CLUSTER_DEV_CLIENT_VERSION=0.1.0-dev",
 		"CLUSTER_ADMIN_ADDR="+managerAdminAddr,
 		"CLUSTER_ADMIN_USER="+adminUser,
@@ -2381,11 +2639,17 @@ func runServices() {
 		"CLUSTER_HTTP_REDIRECT_ADDR="+managerRedirectAddr,
 		"LOG_LEVEL=debug",
 	)
+	if binaryServerURL != "" {
+		managerEnv = append(managerEnv, "CLUSTER_DEV_BACKEND_URL="+binaryServerURL)
+	}
+	managerCmd.Env = managerEnv
 	managerCmd.Stdout = managerLogs
 	managerCmd.Stderr = managerLogs
+	prepareGroup(managerCmd)
 	if err := managerCmd.Start(); err != nil {
 		fatal("start cluster-manager: %v", err)
 	}
+	registerForCleanup(managerCmd)
 
 	if err := waitForHTTP("https://"+managerAddr+"/healthz", 30*time.Second); err != nil {
 		managerLogs.Dump(os.Stderr)
@@ -2411,7 +2675,7 @@ func runServices() {
 		dashPort := strings.Split(cs.dashAddr, ":")[1]
 		logs := newLogBuffer(cs.name, logDir)
 		defer logs.Close()
-		cmd := exec.Command("go", "run", "./cmd/synergia-client",
+		cmd := exec.Command(clientBin,
 			"--manager-url", "wss://"+managerAddr+"/ws/worker",
 			"--llm-url", "http://"+cs.llamaAddr,
 			"--dashboard-addr", cs.dashAddr,
@@ -2427,9 +2691,11 @@ func runServices() {
 		cmd.Env = append(os.Environ(), "LOG_LEVEL=debug", "CLUSTER_WORKER_KEY="+workerKey)
 		cmd.Stdout = logs
 		cmd.Stderr = logs
+		prepareGroup(cmd)
 		if err := cmd.Start(); err != nil {
 			fatal("start %s: %v", cs.name, err)
 		}
+		registerForCleanup(cmd)
 		if i == 0 {
 			clientLogs = logs
 			clientCmd = cmd

@@ -29,13 +29,21 @@ func (v *VersionAPI) BinaryDownloadHandler(w http.ResponseWriter, r *http.Reques
 	version := r.URL.Query().Get("version")
 	osParam := r.URL.Query().Get("os")
 	archParam := r.URL.Query().Get("arch")
+	kindParam := r.URL.Query().Get("kind")
+	if kindParam == "" {
+		kindParam = "client"
+	}
 
 	if version == "" || osParam == "" || archParam == "" {
 		http.Error(w, "version, os, and arch query params required", http.StatusBadRequest)
 		return
 	}
+	if kindParam != "client" && kindParam != "updater" {
+		http.Error(w, "kind must be 'client' or 'updater'", http.StatusBadRequest)
+		return
+	}
 
-	url := buildDownloadURL(version, osParam, archParam)
+	url := buildDownloadURL(version, osParam, archParam, kindParam)
 
 	resp, err := http.Get(url)
 	if err != nil {
@@ -57,8 +65,12 @@ func (v *VersionAPI) BinaryDownloadHandler(w http.ResponseWriter, r *http.Reques
 	io.Copy(w, resp.Body)
 }
 
-func buildDownloadURL(version, os, arch string) string {
-	name := fmt.Sprintf("synergia-client-%s-%s", os, arch)
+func buildDownloadURL(version, os, arch, kind string) string {
+	base := "synergia-client"
+	if kind == "updater" {
+		base = "synergia-updater"
+	}
+	name := fmt.Sprintf("%s-%s-%s", base, os, arch)
 	if os == "windows" {
 		name += ".exe"
 	}
