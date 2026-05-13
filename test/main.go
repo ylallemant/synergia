@@ -192,7 +192,9 @@ func main() {
 	keepAlive := false
 	runOnly := false
 	sendOnly := false
+	upgradeTest := false
 	var sendEndpoint, sendKey, sendModel string
+	var upgradeFrom, upgradeTo string
 
 	args := os.Args[1:]
 	for i, arg := range args {
@@ -203,6 +205,8 @@ func main() {
 			runOnly = true
 		case "--send", "-send":
 			sendOnly = true
+		case "--upgrade-test", "-upgrade-test":
+			upgradeTest = true
 		case "--endpoint", "-endpoint":
 			if i+1 < len(args) {
 				sendEndpoint = args[i+1]
@@ -215,7 +219,29 @@ func main() {
 			if i+1 < len(args) {
 				sendModel = args[i+1]
 			}
+		case "--from", "-from":
+			if i+1 < len(args) {
+				upgradeFrom = args[i+1]
+			}
+		case "--to", "-to":
+			if i+1 < len(args) {
+				upgradeTo = args[i+1]
+			}
 		}
+	}
+
+	if upgradeTest {
+		if upgradeTo == "" {
+			fmt.Fprintln(os.Stderr, "usage: go run ./test --upgrade-test --to <version> [--from <version>]")
+			fmt.Fprintln(os.Stderr, "  --to:   target version (must exist on GitHub releases)")
+			fmt.Fprintln(os.Stderr, "  --from: stale version stamped into the local client build (default: 0.0.0-stale)")
+			os.Exit(1)
+		}
+		if upgradeFrom == "" {
+			upgradeFrom = "0.0.0-stale"
+		}
+		runUpgradeTest(upgradeFrom, upgradeTo)
+		return
 	}
 
 	if runOnly {
@@ -274,7 +300,7 @@ func main() {
 	// before we could assign it). With direct binaries the test owns a flat
 	// process tree and Job Object cleanup is race-free. As a side benefit
 	// each run is also faster (no per-launch recompile).
-	managerBin, clientBin := buildTestBinaries(repoRoot, filepath.Join(testDir, "bin"))
+	managerBin, clientBin := buildTestBinaries(repoRoot, filepath.Join(testDir, "bin"), "")
 
 	// --- Step 0: Generate TLS certificates ---
 	step("0. Generating TLS certificates")
@@ -2222,7 +2248,12 @@ func step(msg string) {
 // test owns a flat process tree (no intermediate go.exe parent), which is
 // required for the Windows Job Object cleanup to terminate every descendant
 // when the test process exits.
-func buildTestBinaries(repoRoot, binDir string) (managerBin, clientBin string) {
+//
+// When clientVersionOverride is non-empty, the synergia-client binary is
+// built with -ldflags injecting that version string. This lets the caller
+// set up a "stale" client (e.g. 0.0.28) and then drive an upgrade test
+// against a real GitHub release of a newer version.
+func buildTestBinaries(repoRoot, binDir, clientVersionOverride string) (managerBin, clientBin string) {
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		fatal("create test bin dir: %v", err)
 	}
@@ -2234,11 +2265,25 @@ func buildTestBinaries(repoRoot, binDir string) (managerBin, clientBin string) {
 	clientBin = filepath.Join(binDir, "synergia-client"+exeExt)
 
 	log.Info().Msg("Building test binaries…")
-	for _, b := range []struct{ out, pkg string }{
-		{managerBin, "./cmd/synergia-manager"},
-		{clientBin, "./cmd/synergia-client"},
-	} {
-		cmd := exec.Command("go", "build", "-o", b.out, b.pkg)
+	type spec struct {
+		out, pkg string
+		ldflags  string
+	}
+	specs := []spec{
+		{managerBin, "./cmd/synergia-manager", ""},
+		{clientBin, "./cmd/synergia-client", ""},
+	}
+	if clientVersionOverride != "" {
+		specs[1].ldflags = "-X github.com/ylallemant/synergia/internal/client/version.Version=" + clientVersionOverride
+		log.Info().Str("version", clientVersionOverride).Msg("stamping client with override version")
+	}
+	for _, b := range specs {
+		buildArgs := []string{"build"}
+		if b.ldflags != "" {
+			buildArgs = append(buildArgs, "-ldflags", b.ldflags)
+		}
+		buildArgs = append(buildArgs, "-o", b.out, b.pkg)
+		cmd := exec.Command("go", buildArgs...)
 		cmd.Dir = repoRoot
 		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
@@ -2522,6 +2567,243 @@ func runPayloadLoop(completionsURL, batchURL, key, model string, stop <-chan str
 	<-stop
 }
 
+// runUpgradeTest exercises the client binary self-update flow end to end:
+//   1. Build a "stale" synergia-client.exe stamped with fromVersion
+//   2. Bring up manager + one client (the stale one)
+//   3. Tell the manager to push an update to toVersion (must exist on the
+//      GitHub releases of this repository)
+//   4. Watch the client receive binary_update → fetch sidecar (Windows) →
+//      download new client → exit → sidecar swaps the .exe → new client
+//      reconnects to the manager reporting toVersion
+//
+// Differs from runServices in three ways: single client (so the .exe is
+// owned by exactly one running process and the sidecar's rename works on
+// Windows), automatic update trigger via admin API, assertions on the
+// cycle, and a clean exit (no Ctrl-C wait).
+func runUpgradeTest(fromVersion, toVersion string) {
+	initLogger()
+
+	log.Info().Msgf("=== Synergia Upgrade Test (%s → %s) ===", fromVersion, toVersion)
+
+	repoRoot := findRepoRoot()
+	testDir := filepath.Join(repoRoot, "test")
+	modelsDir := filepath.Join(testDir, "testdata", "models")
+	runDir := filepath.Join(testDir, "runs", time.Now().Format("2006-01-02_15-04-05"))
+	dataDir := filepath.Join(runDir, "data")
+	logDir := filepath.Join(runDir, "logs")
+	for _, d := range []string{modelsDir, dataDir, logDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			fatal("create dir %s: %v", d, err)
+		}
+	}
+	if lf := addLogFile(filepath.Join(logDir, "test-run.log")); lf != nil {
+		defer lf.Close()
+	}
+	cleanupOldRuns(filepath.Join(testDir, "runs"), 3)
+
+	// Build with the stale version stamped in.
+	managerBin, clientBin := buildTestBinaries(repoRoot, filepath.Join(testDir, "bin"), fromVersion)
+
+	// Free only the ports this single-client setup uses.
+	for _, addr := range []string{
+		managerAddr, managerAdminAddr, managerRedirectAddr,
+		clientDashboardAddr, clientLlamaAddr,
+	} {
+		freePort(addr)
+	}
+
+	tlsDir := filepath.Join(testDir, "testdata", "tls")
+	caCertPath, serverCertPath, serverKeyPath, err := ensureTLSCerts(tlsDir)
+	if err != nil {
+		fatal("TLS cert generation: %v", err)
+	}
+	caCertPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		fatal("read CA cert: %v", err)
+	}
+	caPool, err := x509.SystemCertPool()
+	if err != nil {
+		caPool = x509.NewCertPool()
+	}
+	if !caPool.AppendCertsFromPEM(caCertPEM) {
+		fatal("failed to parse CA certificate")
+	}
+	http.DefaultTransport = &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: caPool},
+	}
+
+	modelPath := filepath.Join(modelsDir, testModelFilename)
+	if err := ensureModel(modelPath); err != nil {
+		fatal("model download: %v", err)
+	}
+
+	// --- Start cluster-manager ---
+	managerLogs := newLogBuffer("cluster-manager", logDir)
+	defer managerLogs.Close()
+	managerCmd := exec.Command(managerBin, "--development")
+	managerCmd.Dir = repoRoot
+	managerCmd.Env = append(os.Environ(),
+		"CLUSTER_LISTEN_ADDR="+managerAddr,
+		"CLUSTER_API_KEY="+apiKey,
+		"CLUSTER_WORKER_KEY="+workerKey,
+		"CLUSTER_MODEL_BACKEND=filesystem",
+		"CLUSTER_MODEL_PATH="+modelsDir,
+		"CLUSTER_DB_PATH="+filepath.Join(dataDir, "cluster-manager.db"),
+		"CLUSTER_ADMIN_ADDR="+managerAdminAddr,
+		"CLUSTER_ADMIN_USER="+adminUser,
+		"CLUSTER_ADMIN_PASSWORD="+adminPassword,
+		"TLS_CERT_FILE="+serverCertPath,
+		"TLS_KEY_FILE="+serverKeyPath,
+		"CLUSTER_HTTP_REDIRECT_ADDR="+managerRedirectAddr,
+		"LOG_LEVEL=debug",
+	)
+	managerCmd.Stdout = managerLogs
+	managerCmd.Stderr = managerLogs
+	prepareGroup(managerCmd)
+	if err := managerCmd.Start(); err != nil {
+		fatal("start cluster-manager: %v", err)
+	}
+	defer cleanup("cluster-manager", managerCmd)
+	watcher.add("cluster-manager", managerCmd, managerLogs)
+
+	if err := waitForHTTP("https://"+managerAddr+"/healthz", 30*time.Second); err != nil {
+		managerLogs.Dump(os.Stderr)
+		fatal("cluster-manager did not become ready: %v", err)
+	}
+	pass("cluster-manager ready on %s", managerAddr)
+
+	// --- Start the single stale client ---
+	// Config goes via env vars rather than CLI flags so it survives the
+	// upgrade. synergia-updater.exe exec's the replaced client with NO
+	// arguments (it doesn't capture the parent's argv), so anything we'd
+	// pass as a flag would be lost on restart and the new client would
+	// fall back to defaults (incl. ~/.synergia/worker/ as data-dir, which
+	// has the user's production worker-state.yaml). Env vars are inherited
+	// through original-client → updater → new-client.
+	clientLogs := newLogBuffer("cluster-client", logDir)
+	defer clientLogs.Close()
+	clientCmd := exec.Command(clientBin)
+	clientCmd.Dir = repoRoot
+	clientCmd.Env = append(os.Environ(),
+		"LOG_LEVEL=debug",
+		"CLUSTER_WORKER_KEY="+workerKey,
+		"GPU_CONTENTION_THRESHOLD=100",
+		"CLUSTER_MANAGER_URL=wss://"+managerAddr+"/ws/worker",
+		"WORKER_LLM_URL=http://"+clientLlamaAddr,
+		"CLUSTER_DASHBOARD_ADDR="+clientDashboardAddr,
+		"WORKER_MODEL="+testModelName,
+		"WORKER_QUANTISATION="+testQuantisation,
+		"WORKER_ROLE=embedding",
+		"WORKER_MODEL_FILE="+modelPath,
+		"CLUSTER_CLIENT_DATA_DIR="+filepath.Join(dataDir, "client-data"),
+		"CLUSTER_CLIENT_AUTO_APPROVE=true",
+		"TLS_CA_CERT="+caCertPath,
+	)
+	clientCmd.Stdout = clientLogs
+	clientCmd.Stderr = clientLogs
+	prepareGroup(clientCmd)
+	if err := clientCmd.Start(); err != nil {
+		fatal("start cluster-client: %v", err)
+	}
+	registerForCleanup(clientCmd)
+	// NOTE: not using watcher.add here — the watcher would treat the
+	// original client's exit (which IS expected, that's how the upgrade
+	// works) as a failure. We rely on the Job Object to clean up the
+	// post-upgrade client process at test exit.
+
+	if err := waitForLog(managerLogs, "worker connected", 60*time.Second); err != nil {
+		fatal("stale client did not connect: %v", err)
+	}
+	if err := waitForLog(clientLogs, "cluster client starting", 30*time.Second); err != nil {
+		fatal("stale client did not finish startup: %v", err)
+	}
+	pass("Stale client connected with version=%s", fromVersion)
+
+	if err := waitForLog(clientLogs, "backend: llama-server process started", 180*time.Second); err != nil {
+		clientLogs.Dump(os.Stderr)
+		fatal("stale client did not start llama-server: %v", err)
+	}
+	pass("Stale client llama-server ready")
+
+	// --- Trigger the upgrade ---
+	// Snapshot offsets so subsequent waits only see post-trigger entries.
+	preTriggerClientOffset := clientLogs.Mark()
+	preTriggerManagerOffset := managerLogs.Mark()
+
+	versionBody := fmt.Sprintf(`{"target_version":"%s","rollout_mode":"all","rollout_percentage":100,"sha256":""}`, toVersion)
+	req, _ := http.NewRequest(http.MethodPost,
+		"https://"+managerAdminAddr+"/v1/admin/version",
+		bytes.NewBufferString(versionBody))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fatal("POST /v1/admin/version: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fatal("admin version POST returned %d", resp.StatusCode)
+	}
+	pass("POST /v1/admin/version → target=%s", toVersion)
+
+	// --- Observe the upgrade cycle in the client log ---
+	if err := waitForLogAfter(clientLogs, "binary update received", preTriggerClientOffset, 30*time.Second); err != nil {
+		fatal("client did not receive binary update: %v", err)
+	}
+	pass("Client received binary_update push")
+
+	if runtime.GOOS == "windows" {
+		if err := waitForLogAfter(clientLogs, "synergia-updater.exe missing — downloading sidecar", preTriggerClientOffset, 30*time.Second); err != nil {
+			log.Warn().Msg("sidecar download log not seen — assuming already installed from a previous run")
+		} else {
+			pass("Sidecar auto-download triggered")
+		}
+		if err := waitForLogAfter(clientLogs, "synergia-updater.exe installed", preTriggerClientOffset, 60*time.Second); err != nil {
+			log.Warn().Msg("sidecar install log not seen")
+		} else {
+			pass("Sidecar installed")
+		}
+	}
+
+	if err := waitForLogAfter(clientLogs, "binary updated successfully — restart required", preTriggerClientOffset, 120*time.Second); err != nil {
+		clientLogs.Dump(os.Stderr)
+		fatal("client did not finish binary download/replace: %v", err)
+	}
+	pass("Client binary downloaded and replaced")
+
+	if err := waitForLogAfter(clientLogs, "restarting after binary update", preTriggerClientOffset, 10*time.Second); err != nil {
+		fatal("client did not reach the restart hook: %v", err)
+	}
+	pass("Client signalled restart-after-update")
+
+	// --- After restart: new process started by the sidecar should reconnect ---
+	// stdout/stderr inheritance carries the new process's logs into the same
+	// logBuffer (sidecar inherited the pipe, the new client inherits from the
+	// sidecar).
+	if err := waitForLogAfterN(managerLogs, "worker connected", 1, preTriggerManagerOffset, 90*time.Second); err != nil {
+		clientLogs.Dump(os.Stderr)
+		fatal("post-upgrade client did not reconnect to manager: %v", err)
+	}
+	pass("Post-upgrade client reconnected to manager")
+
+	if err := waitForLogAfter(clientLogs, "cluster client starting", preTriggerClientOffset, 30*time.Second); err != nil {
+		fatal("post-upgrade client did not log startup: %v", err)
+	}
+	if err := waitForLogAfter(clientLogs, "version="+toVersion, preTriggerClientOffset, 5*time.Second); err != nil {
+		clientLogs.Dump(os.Stderr)
+		fatal("post-upgrade client did not report version=%s: %v", toVersion, err)
+	}
+	pass("Post-upgrade client reports version=%s", toVersion)
+
+	log.Info().Msg("")
+	log.Info().Msgf("=== UPGRADE TEST PASSED (%s → %s) ===", fromVersion, toVersion)
+
+	// Cleanup is handled by deferred cleanups + the Job Object at process
+	// exit. Mark watcher as stopping so the cluster-manager Wait() loop
+	// doesn't fatal during teardown.
+	watcher.stopping.Store(true)
+}
+
 func runServices() {
 	initLogger()
 
@@ -2544,7 +2826,7 @@ func runServices() {
 
 	// Pre-build the synergia binaries so the test owns a flat process tree —
 	// required for reliable Windows Job Object cleanup. See buildTestBinaries.
-	managerBin, clientBin := buildTestBinaries(repoRoot, filepath.Join(testDir, "bin"))
+	managerBin, clientBin := buildTestBinaries(repoRoot, filepath.Join(testDir, "bin"), "")
 
 	// Pre-flight: kill any stale processes holding required ports.
 	for _, addr := range []string{

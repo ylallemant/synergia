@@ -7,42 +7,57 @@ notes the suspected failure mode and a starting point for the work.
 
 The items below complement the ones already fixed (tray PNG→ICO wrapper,
 sidecar auto-download, backend-update file-in-use, hwinfo collection, VRAM
-registry path, TLS pool, Job Object cleanup, multi-size ICO, freePort).
-See `docs/architecture/client/README.md` for the broader Windows feature
-matrix.
+registry path, TLS pool, Job Object cleanup, multi-size ICO, freePort,
+binary self-update e2e). See `docs/architecture/client/README.md` for the
+broader Windows feature matrix.
 
 ---
 
-## 1. End-to-end binary self-update flow
+## 1. ~~End-to-end binary self-update flow~~ — VALIDATED
 
-**What we have**
-- [`cmd/synergia-updater/main.go`](../cmd/synergia-updater/main.go) — the sidecar that performs the locked-file swap.
-- [`internal/client/updater/replace_windows.go`](../internal/client/updater/replace_windows.go) — calls the sidecar with `--pid/--src/--dst/--restart`.
-- [`internal/client/updater/ensure_windows.go`](../internal/client/updater/ensure_windows.go) — fetches the sidecar from the GitHub release on first need, with a manager-proxy fallback.
-- Integration test step 20 + the Windows-only sidecar download verification check.
+The full GitHub → sidecar → swap → restart → reconnect cycle has been
+exercised end to end on Windows by the dedicated `--upgrade-test` mode:
 
-**What's unverified**
-The actual swap. The test pushes `v99.0.0-test` (a deliberately non-existent
-version) so the binary download fails fast and only the *attempt* is asserted.
-We have never round-tripped a real version bump end to end on Windows:
+```
+go run ./test --upgrade-test --from 0.0.28 --to 0.0.29
+```
 
-1. Client running.
-2. Admin POSTs a real target version that exists on GitHub releases.
-3. Client downloads new binary, downloads sidecar (if missing), invokes the sidecar.
-4. Sidecar waits for the parent to exit, renames `.exe` → `.exe.bak`, moves new binary into place, starts it.
-5. New process reconnects and the manager observes the new `X-Worker-Version`.
+The mode:
 
-**Things that could break**
-- Sidecar version-skew (auto-downloaded sidecar is the new version, but the running client expects the old contract).
-- The 60 s reconnect-or-rollback timer (described in `docs/architecture/README.md`) — we have no automated test for the rollback path.
-- Path quoting if the install location contains spaces (`Program Files`).
+1. Builds a "stale" `synergia-client.exe` with the `--from` version stamped in via `-ldflags`.
+2. Brings up a single-client cluster against a real GitHub release.
+3. Triggers the update via `/v1/admin/version`.
+4. Asserts: `binary_update` received → sidecar fetched (if missing) → binary downloaded → swap → restart → manager observes a fresh connection → post-upgrade client logs `cluster client starting … version=<to>`.
+
+The first round of this test surfaced **two real bugs** (now fixed):
+
+- **`updater.Apply` raced its own download cleanup** — an unconditional
+  `defer os.Remove(tmpPath)` deleted the downloaded `.exe` before the
+  asynchronous Windows sidecar could rename it into place. Worked on Unix
+  by coincidence (sync `os.Rename`). Now uses a `cleanupTmp bool` guard
+  that only fires on error paths.
+
+- **Sidecar restart drops the parent's argv** — `synergia-updater.exe`
+  exec's the replaced client with no arguments, so any CLI flag the
+  parent had (`--manager-url`, `--data-dir`, `--llm-url`, …) is lost. The
+  new client falls back to defaults — including `~/.synergia/worker/` as
+  the data-dir, which may hold a `worker-state.yaml` from an unrelated
+  install pointing at a different cluster. This is by design (the sidecar
+  is stateless on purpose), but it means **configuration must come from
+  env vars, `worker-state.yaml`, or the sentinel-patched manager URL —
+  never from CLI flags** if it has to survive an upgrade. The test now
+  passes all client config via env vars (`CLUSTER_MANAGER_URL`,
+  `WORKER_LLM_URL`, `CLUSTER_CLIENT_DATA_DIR`, etc.) which inherit
+  cleanly through `parent → sidecar → new client`.
+
+### Still worth a manual run before public release
+
+Edge cases the automated test doesn't cover:
+
+- Path with spaces (`C:\Program Files\Synergia\…`) — both the rename and the autostart registry value need to handle quoting.
 - Anti-virus quarantining the freshly-downloaded `.exe` between download and `os.Rename`.
-
-**How to verify**
-Build a real `v0.X.Y-test` release on GitHub with both `synergia-client-windows-amd64.exe`
-and `synergia-updater-windows-amd64.exe`, then run a manual test on a clean
-Windows VM pointing at it. Watch `client.log` and the registered binary path
-through the cycle.
+- The 60 s reconnect-or-rollback timer (described in `docs/architecture/README.md`) — no automated test for the rollback path yet.
+- Sidecar version-skew across major-version jumps (the v0.x → v0.x+1 contract is stable; multi-version skips are not exercised).
 
 ---
 

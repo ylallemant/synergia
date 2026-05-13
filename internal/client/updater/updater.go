@@ -69,7 +69,19 @@ func (u *Updater) Apply(bu *protocol.BinaryUpdate) (bool, error) {
 			return false, fmt.Errorf("both upstream and manager download failed: %w", err)
 		}
 	}
-	defer os.Remove(tmpPath) // cleanup on failure
+	// Cleanup tmpPath on every error path below. On the success path the
+	// download is consumed by selfReplace — either renamed into place on
+	// Unix (so removing it is a no-op) or handed off to synergia-updater
+	// on Windows (which will rename it from this same path AFTER our
+	// process exits). The previous unconditional `defer os.Remove` raced
+	// with the Windows sidecar and deleted the file before it could be
+	// installed, leaving the on-disk binary unchanged.
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			os.Remove(tmpPath)
+		}
+	}()
 
 	// Verify SHA256 if provided
 	if bu.SHA256 != "" {
@@ -86,6 +98,8 @@ func (u *Updater) Apply(bu *protocol.BinaryUpdate) (bool, error) {
 	if err := selfReplace(execPath, tmpPath); err != nil {
 		return false, fmt.Errorf("self-replace failed: %w", err)
 	}
+	// selfReplace owns tmpPath from here on — don't clean it up.
+	cleanupTmp = false
 
 	log.Info().Str("version", bu.Version).Msg("binary updated successfully — restart required")
 	return true, nil
